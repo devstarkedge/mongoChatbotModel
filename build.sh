@@ -10,3 +10,4 @@ python manage.py migrate
 
 # Collect static files for WhiteNoise
 python manage.py collectstatic --no-input
+

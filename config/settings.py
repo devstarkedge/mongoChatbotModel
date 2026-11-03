@@ -350,4 +350,5 @@ PLANNER_MODEL = os.getenv("PLANNER_MODEL", "").strip()
 # ------------------------------------------------------------------- Cache
 CACHE_TTL_SECONDS = _int("CACHE_TTL_SECONDS", 600)   # 0 disables the answer cache
 CACHE_MAX_ENTRIES = _int("CACHE_MAX_ENTRIES", 500)
-WARMUP_ON_START = _bool("WARMUP_ON_START", True)
+_default_warmup = not bool(os.getenv("RENDER"))
+WARMUP_ON_START = _bool("WARMUP_ON_START", _default_warmup)

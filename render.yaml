@@ -27,3 +27,4 @@ services:
         generateValue: true
       - key: INGEST_TOKEN
         generateValue: true
+
