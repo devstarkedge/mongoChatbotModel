@@ -90,10 +90,34 @@ CSRF_COOKIE_SECURE = not DEBUG
 SESSION_COOKIE_AGE = 60 * 60 * 12
 CORS_ALLOWED_ORIGINS = _list(
     "DJANGO_CORS_ALLOWED_ORIGINS",
-    "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173",
+    "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,https://chatbot-frontend-1gbi.onrender.com",
 )
 CORS_ALLOW_CREDENTIALS = True
-CORS_URLS_REGEX = r"^/api/.*$"
+CORS_URLS_REGEX = r"^.*$"
+CORS_ALLOW_ALL_ORIGINS = _bool("CORS_ALLOW_ALL_ORIGINS", True)
+CORS_ALLOWED_ORIGIN_REGEXES = [
+    r"^https:\/\/.*\.onrender\.com$",
+    r"^http:\/\/localhost:\d+$",
+]
+CORS_ALLOW_METHODS = [
+    "DELETE",
+    "GET",
+    "OPTIONS",
+    "PATCH",
+    "POST",
+    "PUT",
+]
+CORS_ALLOW_HEADERS = [
+    "accept",
+    "accept-encoding",
+    "authorization",
+    "content-type",
+    "dnt",
+    "origin",
+    "user-agent",
+    "x-csrftoken",
+    "x-requested-with",
+]
 REST_FRAMEWORK = {
     "UNAUTHENTICATED_USER": None,
     "UNAUTHENTICATED_TOKEN": None,
