@@ -48,10 +48,10 @@ vector_store/*
 # Temporary / Scratch scripts and local dumps
 _scratch/
 scratch/
-check_*.py
-fix_*.py
-find_*.py
-strip_html_fix.py
+/check_*.py
+/fix_*.py
+/find_*.py
+/strip_html_fix.py
 installed_packages.txt
 
 # Testing & Coverage
