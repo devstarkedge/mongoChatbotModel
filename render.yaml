@@ -5,7 +5,7 @@ services:
     region: oregon
     plan: free
     buildCommand: "./build.sh"
-    startCommand: "gunicorn config.wsgi:application --bind 0.0.0.0:$PORT"
+    startCommand: "gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --timeout 120"
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
@@ -27,4 +27,3 @@ services:
         generateValue: true
       - key: INGEST_TOKEN
         generateValue: true
-

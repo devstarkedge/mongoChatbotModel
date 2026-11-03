@@ -762,8 +762,11 @@ def health() -> dict:
     if info["mongo"]:
         try:
             info["embeddings"] = embedding_store.count()
-            index = vector_index.get_index()
-            info["index"] = {"ready": True, "vectors": len(index.ids), "built_at": index.built_at}
+            if vector_index.is_ready():
+                index = vector_index.get_index()
+                info["index"] = {"ready": True, "vectors": len(index.ids), "built_at": index.built_at}
+            else:
+                info["index"] = {"ready": False, "message": "Search index not loaded on disk"}
         except ChatbotError as exc:
             info["index"] = {"ready": False, "message": exc.message}
     info["status"] = "ok" if info["mongo"] and info["index"]["ready"] else "degraded"
