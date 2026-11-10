@@ -377,6 +377,7 @@ LLM_REASONING_EFFORT = os.getenv("LLM_REASONING_EFFORT", "").strip()
 PLANNER_MODEL = os.getenv("PLANNER_MODEL", "").strip()
 
 # ------------------------------------------------------------------- Cache
-CACHE_TTL_SECONDS = _int("CACHE_TTL_SECONDS", 600)   # 0 disables the answer cache
+CACHE_TTL_SECONDS = _int("CACHE_TTL_SECONDS", 0)   # 0 disables the answer cache
+# CACHE_TTL_SECONDS = _int("CACHE_TTL_SECONDS", 600) 
 CACHE_MAX_ENTRIES = _int("CACHE_MAX_ENTRIES", 500)
 WARMUP_ON_START = _bool("WARMUP_ON_START", True)
