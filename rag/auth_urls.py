@@ -1,5 +1,5 @@
 from django.contrib.auth import authenticate
-from django.urls import path
+from django.urls import path, re_path
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -46,6 +46,8 @@ class MeView(APIView):
 
 
 urlpatterns = [
-    path("login/", LoginView.as_view()),
-    path("me/", MeView.as_view()),
+    path("login/", LoginView.as_view(), name="auth_login_path"),
+    path("me/", MeView.as_view(), name="auth_me_path"),
+    re_path(r"^login/?$", LoginView.as_view(), name="auth_login"),
+    re_path(r"^me/?$", MeView.as_view(), name="auth_me"),
 ]
