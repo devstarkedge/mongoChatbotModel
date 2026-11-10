@@ -1,0 +1,324 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <!-- Page metadata, fonts, and the stylesheets shared by the landing page and chatbot. -->
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#123326">
+  <title>M1 Pro | Precision, without compromise</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700;800;900&family=DM+Sans:wght@400;500;600;700&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="{% static 'rag/app.css' %}?v=20261023-2">
+</head>
+
+<body>
+  <!-- Promotional product section displayed above the database assistant. -->
+  <main class="demo-site" id="home">
+    <header class="site-header">
+      <a class="site-brand" href="#home" aria-label="M1 Pro home"><span class="brand-mark">G</span><span>GEAR /
+          ONE</span></a>
+      <nav class="site-nav" aria-label="Product navigation">
+        <a href="#details">Details</a>
+        <a href="#specs">Specs</a>
+        <a href="#reviews">Reviews</a>
+      </nav>
+      <a class="site-buy" href="#specs">Explore M1 Pro <span aria-hidden="true">↗</span></a>
+    </header>
+
+    <section class="product-hero" aria-labelledby="product-title">
+      <div class="hero-copy">
+        <p class="eyebrow"><span></span> M1 PRO / PRECISION GAMING MOUSE</p>
+        <h1 id="product-title">PERFECT<br>GAME.<br><em>ZERO</em><br>COMPROMISE.</h1>
+        <p class="hero-description">Built for the split-second decisions that change everything. Lighter, faster, and
+          shaped around the way you play.</p>
+        <div class="hero-actions">
+          <a class="button-lime" href="#specs">Meet the M1 Pro <span aria-hidden="true">↗</span></a>
+          <a class="text-link" href="#details">Discover the design <span aria-hidden="true">↓</span></a>
+        </div>
+        <div class="hero-proof"><span class="proof-stars" aria-label="5 out of 5 stars">★★★★★</span><span>Built for the
+            next move</span></div>
+      </div>
+      <div class="hero-product" aria-label="M1 Pro precision gaming mouse">
+        <img
+          src="https://images.unsplash.com/photo-1527814050087-3793815479db?auto=format&amp;fit=crop&amp;w=1500&amp;q=88"
+          alt="Precision computer mouse with an ergonomic sculpted shape">
+        <span class="product-index">M1 / 2025</span>
+        <span class="product-callout callout-top"><i></i> 26K OPTICAL SENSOR</span>
+        <span class="product-callout callout-bottom"><i></i> 69G ULTRALIGHT SHELL</span>
+        <span class="orbit orbit-one" aria-hidden="true"></span>
+        <span class="orbit orbit-two" aria-hidden="true"></span>
+      </div>
+      <a class="hero-scroll" href="#reviews"><span>SCROLL TO EXPLORE</span><i aria-hidden="true"></i></a>
+    </section>
+
+    <section class="review-strip" id="reviews" aria-label="Product ratings">
+      <p>MADE FOR THE MOMENT<br><strong>THAT MATTERS.</strong></p>
+      <div class="review-rating"><span class="rating-mark">G</span><span class="rating-stars">★★★★★</span><small>PLAYER
+          RATING</small></div>
+      <div class="review-metric"><strong>69<span>g</span></strong><small>ULTRALIGHT BUILD</small></div>
+      <div class="review-metric"><strong>26<span>K</span></strong><small>OPTICAL DPI</small></div>
+      <div class="review-metric"><strong>1<span>ms</span></strong><small>RESPONSE TIME</small></div>
+    </section>
+
+    <section class="details-section" id="details">
+      <div class="details-heading">
+        <p class="eyebrow dark-eyebrow">ENGINEERED WITH INTENT / 01—03</p>
+        <h2>EVERYTHING<br>INSIDE HAS<br><em>A PURPOSE.</em></h2>
+        <p class="details-intro">Every gram, curve, and click has been considered. Nothing added for show. Nothing left
+          to chance.</p>
+      </div>
+      <div class="feature-list" id="specs">
+        <article class="feature-row"><span class="feature-number">01</span>
+          <div>
+            <h3>Track every instinct.</h3>
+            <p>A flagship optical sensor keeps every movement exact, from slow tracking to a full-speed flick.</p>
+          </div><span class="feature-spec">26,000 DPI</span>
+        </article>
+        <article class="feature-row"><span class="feature-number">02</span>
+          <div>
+            <h3>Move without drag.</h3>
+            <p>An open-cell shell cuts weight while keeping the structure steady through long sessions.</p>
+          </div><span class="feature-spec">69 GRAMS</span>
+        </article>
+        <article class="feature-row"><span class="feature-number">03</span>
+          <div>
+            <h3>Click on instinct.</h3>
+            <p>Low-latency switches register the moment you decide. No delay between thought and action.</p>
+          </div><span class="feature-spec">1 MS RESPONSE</span>
+        </article>
+        <a class="spec-link" href="#home">Back to the top <span aria-hidden="true">↑</span></a>
+      </div>
+    </section>
+
+    <footer class="site-footer"><a class="site-brand" href="#home"><span class="brand-mark">G</span><span>GEAR /
+          ONE</span></a><span>DESIGNED FOR THE NEXT MOVE.</span><a href="#home">M1 PRO / 2025</a></footer>
+  </main>
+
+  <!-- Chatbot application shell: navigation switches between chat, search, and index views. -->
+  <div class="frame">
+    <header class="topbar">
+      <a class="brand" href="#chat" aria-label="Mongo RAG home">
+        <span class="orb">
+          <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+            <path d="M12 2.5l8.2 4.75v9.5L12 21.5l-8.2-4.75v-9.5z" fill="none" stroke="#fff" stroke-width="2"
+              stroke-linejoin="round" />
+            <circle cx="12" cy="12" r="3.2" fill="#fff" />
+          </svg>
+        </span>
+        <span class="brand-name">Mongo RAG</span>
+      </a>
+
+      <nav class="tabs" aria-label="Sections">
+        <button type="button" class="tab" data-view="chat"><span class="spark"></span>Chat</button>
+        <button type="button" class="tab" data-view="search"><span class="spark"></span>Search</button>
+        <button type="button" class="tab" data-view="data"><span class="spark"></span>Index</button>
+      </nav>
+
+      <button type="button" id="statusPill" class="status-pill" data-state="loading" title="Open index details">
+        <i class="dot"></i><span id="statusText">Checking index…</span>
+      </button>
+    </header>
+
+    <!-- Each section is a client-side view; app.js toggles visibility when a tab is selected. -->
+    <main class="stage">
+      <!-- Chat view: recent sessions, conversation thread, and question composer. -->
+      <section id="view-chat" class="view chat-layout is-empty widget-closed sidebar-collapsed" aria-label="Chat">
+        <!-- app.js fills this list from this browser session's chat history. -->
+        <aside id="chatSidebar" class="chat-sidebar">
+          <div class="sidebar-header">
+            <button type="button" id="sidebarNewChat" class="btn-sidebar-new">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2"
+                stroke-linecap="round" aria-hidden="true">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+              New chat
+            </button>
+            <button type="button" id="sidebarToggle" class="sidebar-toggle" aria-label="Toggle sidebar"
+              title="Toggle sidebar">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+                <path d="M9 3v18" />
+              </svg>
+            </button>
+          </div>
+          <div class="sidebar-title">Recent Chats</div>
+          <div id="chatHistoryList" class="chat-history-list" aria-label="Chat history"></div>
+        </aside>
+
+        <div class="chat-main">
+          <!-- Chat title and controls for opening history or closing the assistant widget. -->
+          <div class="widget-header">
+            <div class="widget-title">
+              <span class="widget-mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <path
+                    d="M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.4 8.4 0 0 1 3.8-.9h.5a8.5 8.5 0 0 1 8 8z" />
+                </svg>
+              </span>
+              <span><strong>Mongo Chatbot</strong><small>Database assistant</small></span>
+            </div>
+            <div class="widget-actions">
+              <button type="button" id="sidebarOpen" class="widget-icon-btn" aria-label="Open chat history"
+                title="Chat history" aria-controls="chatSidebar" aria-expanded="false">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <rect x="3" y="3" width="18" height="18" rx="2" />
+                  <path d="M9 3v18" />
+                </svg>
+                <span>History</span>
+              </button>
+              <button type="button" id="chatWidgetClose" class="widget-icon-btn" aria-label="Close chat"
+                title="Close chat">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" aria-hidden="true">
+                  <path d="m18 6-12 12M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          <!-- Initial greeting shown before the first conversation turn. -->
+          <div class="hero">
+            <span class="hero-orb">
+              <svg viewBox="0 0 24 24" width="30" height="30" aria-hidden="true">
+                <path d="M12 2.5l8.2 4.75v9.5L12 21.5l-8.2-4.75v-9.5z" fill="none" stroke="currentColor"
+                  stroke-width="2" stroke-linejoin="round" />
+                <circle cx="12" cy="12" r="3.2" fill="currentColor" />
+              </svg>
+            </span>
+            <h1>Hi, I'm your Assistant</h1>
+            <p>Ask anything about your MongoDB data. I answer only from your records.</p>
+          </div>
+
+          <!-- JavaScript inserts user and assistant messages into this live region. -->
+          <div id="thread" class="thread" aria-live="polite">
+            <div id="threadInner" class="thread-inner"></div>
+          </div>
+
+          <!-- Question input and answer-detail toggles; the form submits to the ask API. -->
+          <div class="dock">
+            <form id="composer" class="composer" autocomplete="off">
+              <label class="sr-only" for="question">Your question</label>
+              <textarea id="question" rows="2" maxlength="500" placeholder="Ask anything…">
+              </textarea>
+              <div class="composer-bar">
+                <div class="toggles">
+                  <button type="button" class="pill-toggle" id="toggleSources" aria-pressed="true">Sources</button>
+                  <button type="button" class="pill-toggle" id="toggleTiming" aria-pressed="false">Timing</button>
+                </div>
+                <div class="composer-end">
+                  <span id="count" class="count" hidden></span>
+                  <button type="submit" id="send" class="send" aria-label="Send" disabled>
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"
+                      stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M22 2L11 13" />
+                      <path d="M22 2l-7 20-4-9-9-4z" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            </form>
+
+            <!-- Presets choose retrieval depth and relationship-expansion settings. -->
+            <div class="modes" role="radiogroup" aria-label="Answer depth">
+              <button type="button" class="mode" role="radio" data-mode="fast" aria-checked="false"
+                title="3 records, no linked records">Fast</button>
+              <button type="button" class="mode" role="radio" data-mode="indepth" aria-checked="true"
+                title="6 records + 1 hop through relationships">In-depth</button>
+              <button type="button" class="mode" role="radio" data-mode="holistic" aria-checked="false"
+                title="10 records + 2 hops through relationships">Holistic</button>
+            </div>
+
+            <!-- Optional example prompts; kept in markup for easy re-enabling. -->
+            <!-- <div class="suggest">
+              <button type="button" class="chip">Which projects have been finished?</button>
+              <button type="button" class="chip">Which workspace does Aisha Khan belong to?</button>
+              <button type="button" class="chip">What tasks are assigned to Rohan Mehta?</button>
+            </div> -->
+
+            <!-- Floating action button for starting a fresh conversation. -->
+            <button type="button" id="newChat" class="fab" aria-label="New chat" title="New chat">
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2"
+                stroke-linecap="round" aria-hidden="true">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+            </button>
+          </div>
+      </section>
+
+      <!-- Search view: inspect retrieved records and optionally include keyword search and related records. -->
+      <section id="view-search" class="view" aria-label="Search" hidden>
+        <div class="panel">
+          <h2>Semantic search</h2>
+          <p class="lead">See exactly which records match, with their scores and relationships. No LLM involved.</p>
+          <form id="searchForm" class="card search-form" autocomplete="off">
+            <label class="sr-only" for="searchInput">Search query</label>
+            <input id="searchInput" type="text" maxlength="500" placeholder="e.g. completed projects in Acme Corp">
+            <div class="search-opts">
+              <label>Results
+                <select id="searchK">
+                  <option>3</option>
+                  <option selected>5</option>
+                  <option>10</option>
+                  <option>20</option>
+                </select>
+              </label>
+              <label class="check"><input type="checkbox" id="searchHybrid" checked> Hybrid (keywords)</label>
+              <label class="check"><input type="checkbox" id="searchExpand"> Follow relationships</label>
+              <button type="submit" class="btn" id="searchBtn">Search</button>
+            </div>
+          </form>
+          <div id="searchOut" class="results"></div>
+        </div>
+      </section>
+
+      <!-- Index view: inspect backend health and start or monitor a protected ingestion job. -->
+      <section id="view-data" class="view" aria-label="Index" hidden>
+        <div class="panel">
+          <h2>Index &amp; ingestion</h2>
+          <p class="lead">What is indexed, which models are in use, and a button to refresh the data.</p>
+          <div id="stats" class="grid"></div>
+
+          <div class="card ingest">
+            <h3>Update the index</h3>
+            <p class="muted">Reads MongoDB, detects relationships and embeds only new or changed records.</p>
+            <div class="ingest-row">
+              <label class="field">Ingest token
+                <input id="tokenInput" type="password" placeholder="only if INGEST_TOKEN is set" autocomplete="off">
+              </label>
+              <label class="check"><input type="checkbox" id="fullInput"> Re-embed everything</label>
+              <button type="button" class="btn" id="ingestBtn">Start ingestion</button>
+            </div>
+            <div id="jobBox" class="job" hidden>
+              <div class="job-head"><span id="jobState" class="badge">idle</span><span id="jobMeta"
+                  class="muted"></span></div>
+              <pre id="jobLog" class="log"></pre>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Floating launcher opens the chatbot widget when it is collapsed. -->
+  <button type="button" id="chatWidgetLauncher" class="chat-widget-launcher" aria-label="Open database assistant"
+    aria-controls="view-chat" aria-expanded="false" title="Chat with your database">
+    <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8"
+      stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path
+        d="M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.4 8.4 0 0 1 3.8-.9h.5a8.5 8.5 0 0 1 8 8z" />
+    </svg>
+  </button>
+
+  <!-- defer lets the browser parse the page before initializing the interactive UI. -->
+  <script src="{% static 'rag/app.js' %}?v=20261023-2" defer></script>
+</body>
+
+</html>
