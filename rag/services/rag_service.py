@@ -10,10 +10,7 @@ import copy
 import logging
 import re
 import time
-<<<<<<< HEAD
-=======
 from html import unescape
->>>>>>> master
 from urllib.parse import urlparse
 
 from django.conf import settings
@@ -271,9 +268,6 @@ def _group(hits: list) -> list:
     return [sorted(g, key=lambda h: h.chunk_index) for g in ordered]
 
 
-<<<<<<< HEAD
-def build_context(main_groups: list, related_groups: list, budget: int = None):
-=======
 _LOGGED_TIME_LINE = re.compile(
     r"^\s*(?:Logged\s+Time|Time\s+Logged|LoggedTime|Work\s+Logs?|Time\s+Logs?|Timesheets?)\b",
     re.IGNORECASE,
@@ -286,7 +280,6 @@ def _without_logged_time_text(text: str) -> str:
 
 def build_context(main_groups: list, related_groups: list, budget: int = None,
                   include_logged_time: bool = True):
->>>>>>> master
     """Build the prompt context under a character budget. Returns (context, included_main, included_related)."""
     budget, used = budget or settings.MAX_CONTEXT_CHARS, 0
     blocks, main_done, related_done = [], [], []
@@ -295,11 +288,8 @@ def build_context(main_groups: list, related_groups: list, budget: int = None,
     def add(label, group, note=""):
         nonlocal used
         text = "\n...\n".join(_strip_html(h.text) for h in group)
-<<<<<<< HEAD
-=======
         if not include_logged_time:
             text = _without_logged_time_text(text)
->>>>>>> master
         prefix = f"[{label}]{note}\n"
         remaining = budget - used - (2 if blocks else 0)
         if remaining <= len(prefix):
@@ -340,16 +330,6 @@ SOURCE_CAP = 25
 
 
 def _retrieval_query(question: str, history: list) -> str:
-<<<<<<< HEAD
-    """Use prior questions as a narrow anchor for elliptical follow-ups, never prior answers."""
-    if not history:
-        return question
-    # A single prior question is enough to resolve pronouns such as "which ones?".
-    # Keeping it clearly separate and prioritizing the current wording reduces
-    # retrieval drift into records relevant only to an earlier turn.
-    prior_question = history[-1]["question"]
-    return f"Follow-up context: {prior_question}\nCurrent question (focus retrieval on this): {question}"[-2000:]
-=======
     """Use recent prior questions as a narrow anchor for elliptical follow-ups, never prior answers."""
     if not history:
         return question
@@ -359,7 +339,6 @@ def _retrieval_query(question: str, history: list) -> str:
     prior_questions = [turn["question"] for turn in history[-3:]]
     context = " | ".join(" ".join(item.split()) for item in prior_questions if item)
     return f"Follow-up context: {context}\nCurrent question (focus retrieval on this): {question}"[-2000:]
->>>>>>> master
 
 
 def _prior_list_reference(question: str, history: list) -> str | None:
@@ -387,8 +366,6 @@ def _prior_list_reference(question: str, history: list) -> str | None:
     return items[index]
 
 
-<<<<<<< HEAD
-=======
 _EMPTY_BULLET_LINE = re.compile(
     r"^\s*(?:[•*+\-]|\d+[.)])\s*[\s,.;:•·\-\u00a0\u200b-\u200d\ufeff]*$"
 )
@@ -407,7 +384,6 @@ def _strip_blank_bullet_lines(text: str) -> str:
     return "\n".join(lines).strip()
 
 
->>>>>>> master
 def _remember(session_id, question, result, edit_index=None, user_id=None):
     if session_id:
         if edit_index is None:
@@ -427,8 +403,6 @@ def _plain_answer(exact) -> str:
     return f"{head}\n\n{items}{more}"
 
 
-<<<<<<< HEAD
-=======
 def _field_from_text(text: str, label: str) -> str:
     match = re.search(rf"\b{re.escape(label)}:\s*([^;]+)", text or "", re.IGNORECASE)
     return match.group(1).strip() if match else ""
@@ -467,20 +441,13 @@ def _meaningful_field(value: str) -> bool:
     return text.casefold() not in _PLACEHOLDER_VALUES
 
 
->>>>>>> master
 def _format_board_answer(exact) -> str:
     """Render board/card exact records as clean, scannable grouped markdown.
 
     No box-drawing (keeps output readable on any screen), no raw URLs, no LLM
-<<<<<<< HEAD
-    truncation — every matching record is shown.
-    """
-    records = exact.records or []
-=======
     truncation — every matching record is shown once.
     """
     records = _unique_records(exact.records or [])
->>>>>>> master
     if not records:
         return f"No {exact.collection} records found."
 
@@ -529,18 +496,6 @@ def _format_board_answer(exact) -> str:
                     fields[k.strip().lower()] = v.strip()
             lines.append(f"**{_emoji(status)} {name}** — `{label}`")
             bullets = []
-<<<<<<< HEAD
-            for key in ("description", "scope", "next steps", "client", "tools", "deadline"):
-                if key in fields and fields[key]:
-                    bullets.append(f"• {fields[key]}")
-            if not bullets:
-                shown = 0
-                for k, v in fields.items():
-                    if k in {"status", "links"} or not v:
-                        continue
-                    bullets.append(f"• {v}")
-                    shown += 1
-=======
 
             def add_bullet(value):
                 value = unescape(str(value or ""))
@@ -565,7 +520,6 @@ def _format_board_answer(exact) -> str:
                     add_bullet(v)
                     if len(bullets) > before:
                         shown += 1
->>>>>>> master
                     if shown >= 3:
                         break
             for b in bullets[:4]:
@@ -593,8 +547,6 @@ def _format_board_answer(exact) -> str:
     return "\n".join(lines).rstrip()
 
 
-<<<<<<< HEAD
-=======
 def _clean_html_text(text: str) -> str:
     """Strip HTML tags while preserving linebreaks and decoding entities."""
     if not text or "<" not in text:
@@ -606,7 +558,6 @@ def _clean_html_text(text: str) -> str:
     return "\n".join(line for line in lines if line)
 
 
->>>>>>> master
 def _exact_answer(question: str, exact, history=None) -> dict:
     """Answer from an exact database query (complete list / exact count)."""
     timings = dict(exact.timings)
@@ -615,11 +566,7 @@ def _exact_answer(question: str, exact, history=None) -> dict:
     if exact.direct_answer:
         # Complete data (for example every logged-time entry) is returned byte-for-byte;
         # the LLM is never allowed to shorten it or drop rows.
-<<<<<<< HEAD
-        answer = _sanitize_ids(exact.direct_answer)
-=======
         answer = _clean_html_text(_sanitize_ids(exact.direct_answer))
->>>>>>> master
     elif exact.collection in {"boards", "cards"} and exact.records:
         # Render board/card records directly as clean grouped markdown: full data,
         # no LLM truncation, no raw URLs.
@@ -631,16 +578,6 @@ def _exact_answer(question: str, exact, history=None) -> dict:
         except LLMError as exc:
             logger.warning("LLM unavailable for an exact result (%s); returning the plain result.", exc.message)
             answer, degraded = _plain_answer(exact), True
-<<<<<<< HEAD
-    answer = _sanitize_ids(answer)
-    timings["llm"] = round((time.perf_counter() - mark) * 1000)
-    not_found = not degraded and answer.lower().startswith(NOT_FOUND_ANSWER.lower().rstrip("."))
-    sources = [] if not_found else [
-        {"collection": exact.collection, "document_id": r["document_id"], "name": r["name"],
-         "score": None, "related": False} for r in exact.records[:SOURCE_CAP]]
-    result = {"question": question, "answer": answer, "sources": sources, "cached": False, "mode": "structured",
-            "collection": exact.collection, "total_matching": exact.total, "records_used": len(exact.records),
-=======
     answer = _strip_blank_bullet_lines(_sanitize_ids(answer))
     timings["llm"] = round((time.perf_counter() - mark) * 1000)
     not_found = not degraded and answer.lower().startswith(NOT_FOUND_ANSWER.lower().rstrip("."))
@@ -650,7 +587,6 @@ def _exact_answer(question: str, exact, history=None) -> dict:
          "score": None, "related": False} for r in visible_records[:SOURCE_CAP]]
     result = {"question": question, "answer": answer, "sources": sources, "cached": False, "mode": "structured",
             "collection": exact.collection, "total_matching": exact.total, "records_used": len(visible_records),
->>>>>>> master
             "conditions": exact.conditions, "list_mode": True, "degraded": degraded, "timings_ms": timings}
     return result
 
@@ -700,13 +636,9 @@ def ask(
         _remember(session_id, question, result, edit_index, chat_owner_id)
         return result
 
-<<<<<<< HEAD
-    if not scope.is_admin and authorization_service.mentions_another_user(question, scope.user_id, scope.user_name):
-=======
     if not scope.is_admin and (
         structured_query.is_person_lookup_question(question) or structured_query.is_person_attribute_question(question)
     ) and authorization_service.mentions_another_user(question, scope.user_id, scope.user_name):
->>>>>>> master
         raise AuthorizationError("You are not authenticated , to access information")
     if session_id and not chat_memory.can_access(session_id, owner_id=chat_owner_id):
         raise InvalidRequestError("This chat session does not belong to your account.")
@@ -791,19 +723,12 @@ def ask(
     # are read from nested loggedTime entries on leave task cards. Privacy is
     # enforced inside _leave_time_answer: a non-admin account only ever sees its
     # own logged time. Route these before the admin-only structured_candidate check.
-<<<<<<< HEAD
-    if not scope.user_id.startswith("guest:"):
-        if structured_query._LEAVE_TIME_QUESTION_PATTERN.search(query_text) and \
-                (structured_query._LEAVE_TYPE_PATTERN.search(query_text)
-                 or re.search(r"\bleave\b", query_text, re.IGNORECASE)):
-=======
     # Also routes superlative leave-count queries ("who takes most leaves").
     if not scope.user_id.startswith("guest:"):
         if (structured_query._LEAVE_TIME_QUESTION_PATTERN.search(query_text)
                 or structured_query._LEAVE_COUNT_SUPERLATIVE_PATTERN.search(query_text)) and \
                 (structured_query._LEAVE_TYPE_PATTERN.search(query_text)
                  or re.search(r"\bleaves?\b", query_text, re.IGNORECASE)):
->>>>>>> master
             leave_time_exact = structured_query.try_structured(
                 query_text,
                 history=history,
@@ -851,12 +776,8 @@ def ask(
         and (logged_time_question or (
             scope.is_admin
             and (list_mode or structured_query.mentions_collection(query_text)
-<<<<<<< HEAD
-                 or structured_query.is_person_lookup_question(query_text))
-=======
                  or structured_query.is_person_lookup_question(query_text)
                  or structured_query.is_person_attribute_question(query_text))
->>>>>>> master
         ))
     )
     cache_result = True
@@ -895,11 +816,6 @@ def ask(
     related = retrieval.expand(hits, hops=hops, allowed_ids=scope.embedding_ids)
     mark("expand")
     budget = max(settings.MAX_CONTEXT_CHARS, settings.LIST_CONTEXT_CHARS) if list_mode else settings.MAX_CONTEXT_CHARS
-<<<<<<< HEAD
-    context, main_done, related_done = build_context(_group(hits), _group(related), budget)
-    answer = llm_service.generate(question, context, max_tokens=settings.LIST_MAX_TOKENS if list_mode else None,
-                                  history=history)
-=======
     context, main_done, related_done = build_context(
         _group(hits), _group(related), budget,
         include_logged_time=structured_query.wants_logged_time(question),
@@ -907,7 +823,6 @@ def ask(
     answer = llm_service.generate(question, context, max_tokens=settings.LIST_MAX_TOKENS if list_mode else None,
                                   history=history)
     answer = _strip_blank_bullet_lines(answer)
->>>>>>> master
     mark("llm")
 
     is_pure_refusal = (
@@ -953,16 +868,8 @@ def health() -> dict:
     if info["mongo"]:
         try:
             info["embeddings"] = embedding_store.count()
-<<<<<<< HEAD
-            if vector_index.is_ready():
-                index = vector_index.get_index()
-                info["index"] = {"ready": True, "vectors": len(index.ids), "built_at": index.built_at}
-            else:
-                info["index"] = {"ready": False, "message": "Search index not loaded on disk"}
-=======
             index = vector_index.get_index()
             info["index"] = {"ready": True, "vectors": len(index.ids), "built_at": index.built_at}
->>>>>>> master
         except ChatbotError as exc:
             info["index"] = {"ready": False, "message": exc.message}
     info["status"] = "ok" if info["mongo"] and info["index"]["ready"] else "degraded"

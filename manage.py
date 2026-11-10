@@ -6,8 +6,6 @@ import sys
 
 def main():
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
-<<<<<<< HEAD
-
     # If running "runserver" in a cloud environment (Render, etc.)
     if len(sys.argv) >= 2 and sys.argv[1] == "runserver":
         port = os.getenv("PORT")
@@ -25,9 +23,6 @@ def main():
                 call_command("migrate", interactive=False)
             except Exception as exc:
                 print(f"[Startup] Auto-migration note: {exc}", file=sys.stderr)
-
-=======
->>>>>>> master
     try:
         from django.core.management import execute_from_command_line
     except ImportError as exc:

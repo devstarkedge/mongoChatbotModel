@@ -1,46 +1,3 @@
-<<<<<<< HEAD
-# ==============================================================================
-# Git Ignore Configuration
-# ==============================================================================
-
-# Secrets and environment configurations
-.env
-.env.local
-.env.*.local
-!.env.example
-*.pem
-*.key
-cookies.txt
-
-# Virtual Environments
-ven/
-venv/
-.venv/
-env/
-ENV/
-env.bak/
-venv.bak/
-
-# Python cache & build artifacts
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-build/
-dist/
-*.egg-info/
-.eggs/
-
-# Django
-db.sqlite3
-db.sqlite3-journal
-staticfiles/
-media/
-*.log
-local_settings.py
-
-# Pre-built Vector Store Index & Catalog (tracked for fast zero-overhead cloud deployment)
-=======
 # Secrets
 .env
 
@@ -56,44 +13,14 @@ staticfiles/
 
 # Generated search index (rebuild with: python manage.py build_index)
 
->>>>>>> master
 vector_store/*
 !vector_store/.gitkeep
 !vector_store/catalog.json
 !vector_store/index_meta.json
 !vector_store/index.faiss
 
-<<<<<<< HEAD
-# Temporary / Scratch scripts and local dumps
-_scratch/
-scratch/
-/check_*.py
-/fix_*.py
-/find_*.py
-/strip_html_fix.py
-installed_packages.txt
-
-# Testing & Coverage
-.pytest_cache/
-.coverage
-htmlcov/
-
-# IDEs and Editors
-.idea/
-.vscode/
-*.swp
-*.swo
-*.sublime-project
-*.sublime-workspace
-
-# Operating System
-.DS_Store
-Thumbs.db
-Desktop.ini
-=======
 
 # Editors / OS
 .idea/
 .vscode/
 .DS_Store
->>>>>>> master
