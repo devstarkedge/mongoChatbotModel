@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # ==============================================================================
 # Git Ignore Configuration
 # ==============================================================================
@@ -39,12 +40,30 @@ media/
 local_settings.py
 
 # Pre-built Vector Store Index & Catalog (tracked for fast zero-overhead cloud deployment)
+=======
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Django
+db.sqlite3
+staticfiles/
+
+# Generated search index (rebuild with: python manage.py build_index)
+
+>>>>>>> master
 vector_store/*
 !vector_store/.gitkeep
 !vector_store/catalog.json
 !vector_store/index_meta.json
 !vector_store/index.faiss
 
+<<<<<<< HEAD
 # Temporary / Scratch scripts and local dumps
 _scratch/
 scratch/
@@ -71,3 +90,10 @@ htmlcov/
 .DS_Store
 Thumbs.db
 Desktop.ini
+=======
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+>>>>>>> master

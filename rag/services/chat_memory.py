@@ -8,7 +8,11 @@ from django.db.models import Q
 from ..anonymous import get_owner, owner_session_qs
 from ..models import ChatMessage, ChatSession
 
+<<<<<<< HEAD
 MAX_TURNS = 10
+=======
+MAX_TURNS = 20
+>>>>>>> master
 MAX_SESSIONS = 5000
 SESSION_TTL_SECONDS = 3600
 

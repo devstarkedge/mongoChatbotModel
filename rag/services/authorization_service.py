@@ -37,6 +37,24 @@ def _id_values(user_id: str) -> list:
     return values
 
 
+<<<<<<< HEAD
+=======
+def mentions_current_user(question: str, user_id: str, current_user_name: str | None = None) -> bool:
+    """True when the question also refers to the signed-in account."""
+    text = question or ""
+    if current_user_name:
+        name = " ".join(current_user_name.split())
+        if name and re.search(rf"(?<!\w){re.escape(name)}(?!\w)", text, re.IGNORECASE):
+            return True
+        words = [word for word in re.findall(r"[A-Za-z][A-Za-z'-]+", name) if len(word) >= 3]
+        if words and any(re.search(rf"(?<!\w){re.escape(word)}(?!\w)", text, re.IGNORECASE) for word in words):
+            return True
+    if user_id and re.search(rf"(?<!\w){re.escape(str(user_id))}(?!\w)", text, re.IGNORECASE):
+        return True
+    return bool(re.search(r"\b(?:me|my|mine|myself|i|i'm|i am)\b", text, re.IGNORECASE))
+
+
+>>>>>>> master
 def mentions_another_user(question: str, user_id: str, current_user_name: str | None = None) -> bool:
     """Detect explicit references to another account without returning its data."""
     tokens = {token for token in re.findall(r"[\w.@+-]+", question) if len(token) >= 3}

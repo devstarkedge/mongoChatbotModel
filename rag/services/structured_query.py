@@ -30,7 +30,11 @@ from pathlib import Path
 from bson import ObjectId
 from django.conf import settings
 
+<<<<<<< HEAD
 from . import cache_service, document_converter, embedding_store, llm_service, mongo_service, relationships
+=======
+from . import authorization_service, cache_service, document_converter, embedding_store, llm_service, mongo_service, relationships
+>>>>>>> master
 from .document_converter import EXTRA_NAME_FIELDS, HEX24, NAME_FIELDS, humanize_key, is_sensitive, strip_id_suffix, strip_html
 from .exceptions import ChatbotError
 from .relationships import _norm, _singular
@@ -349,6 +353,22 @@ def validate_plan(plan, catalog: dict):
     """Return a clean plan or None. Strict on purpose: reject rather than guess."""
     if not isinstance(plan, dict):
         return None
+<<<<<<< HEAD
+=======
+    action = plan.get("action")
+    if action in {"logged_time", "employee_work", "project_team", "leave_records"}:
+        clean_action = {"action": action}
+        for k in ("person", "project", "date", "extremum", "status", "leave_type"):
+            val = plan.get(k)
+            if isinstance(val, str) and val.strip():
+                clean_action[k] = val.strip()
+            elif isinstance(val, (int, float)):
+                clean_action[k] = str(val)
+        if "verify" in plan:
+            clean_action["verify"] = bool(plan.get("verify"))
+        return clean_action
+
+>>>>>>> master
     collection = plan.get("collection")
     if not isinstance(collection, str):
         return None
@@ -399,21 +419,40 @@ def _ids_by_name(target: str, value: str) -> list:
     if not tokens:
         return []
     fields = NAME_FIELDS + EXTRA_NAME_FIELDS
+<<<<<<< HEAD
     cond = {"$and": [{"$or": [{f: re.compile(re.escape(t), re.IGNORECASE)} for f in fields]} for t in tokens]}
+=======
+    cond = {"$and": [{"$or": [{f: re.compile(rf"\b{re.escape(t)}\b", re.IGNORECASE)} for f in fields]} for t in tokens]}
+>>>>>>> master
     ids = []
     for doc in mongo_service.get_db()[target].find(cond, {"_id": 1}).limit(50):
         ids.extend([doc["_id"], str(doc["_id"])])
     if not ids and len(tokens) == 1 and len(tokens[0]) >= 4:
+<<<<<<< HEAD
         norm_token = _norm(tokens[0])
+=======
+        raw_token = tokens[0]
+        norm_token = _norm(raw_token)
+        clean_norm = norm_token[:-1] if norm_token.endswith("s") and not norm_token.endswith("ss") and len(norm_token) > 3 else norm_token
+>>>>>>> master
         projection = {"_id": 1, **{f: 1 for f in fields}}
         for doc in mongo_service.get_db()[target].find({}, projection).limit(100):
             matched = False
             for f in fields:
                 val = doc.get(f)
+<<<<<<< HEAD
                 if isinstance(val, str) and (norm_token in _norm(val) or _norm(val) in norm_token):
                     ids.extend([doc["_id"], str(doc["_id"])])
                     matched = True
                     break
+=======
+                if isinstance(val, str):
+                    nv = _norm(val)
+                    if nv and (norm_token in nv or clean_norm in nv or (len(nv) >= 4 and (nv in norm_token or nv in clean_norm))):
+                        ids.extend([doc["_id"], str(doc["_id"])])
+                        matched = True
+                        break
+>>>>>>> master
     _name_ids.set(key, ids)
     return ids
 
@@ -508,9 +547,187 @@ def mentions_collection(question: str) -> bool:
     return any(_norm(n) in words or _singular(_norm(n)) in singular_words for n in names)
 
 
+<<<<<<< HEAD
 _PERSON_LOOKUP_PATTERN = re.compile(
     r"^(?:who\s+is|tell\s+me\s+about|what\s+do\s+you\s+know\s+about)\s+"
     r"(?:the\s+)?([A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){0,3})[?.!]*$",
+=======
+_USER_ATTR_EMAIL = re.compile(r"\b(?:emails?|email\s+address(?:es)?|mail|emailid|email[- ]id)\b", re.IGNORECASE)
+_USER_ATTR_WORKSPACE = re.compile(r"\b(?:workspace[s]?|company|companies|organization[s]?|team[s]?)\b", re.IGNORECASE)
+_USER_ATTR_ROLE = re.compile(r"\b(?:roles?|job\s*titles?|designations?|positions?)\b", re.IGNORECASE)
+_USER_ATTR_PROFILE = re.compile(r"\b(?:who\s+is|tell\s+me\s+about|profile\s+of|details\s+of|information\s+about|info\s+of)\b", re.IGNORECASE)
+_PRONOUN_PATTERN = re.compile(r"\b(?:he|him|his|she|her|they|them|their|this\s+person|this\s+employee|that\s+person|that\s+employee)\b", re.IGNORECASE)
+
+
+def is_person_attribute_question(question: str) -> bool:
+    """Check if the question asks for a specific person's email, workspace, role, or profile."""
+    q = question or ""
+    if re.search(r"\b(?:my|mine|myself|who\s+am\s+i|am\s+i)\b", q, re.IGNORECASE):
+        return False
+    if _USER_ATTR_EMAIL.search(q):
+        return bool(_PRONOUN_PATTERN.search(q)
+                    or re.search(r"['’]s\s+email|\bemail\s+(?:of|for)\b|\bwhat\s+is\s+email\b", q, re.IGNORECASE)
+                    or re.search(r"\b[A-Za-z][A-Za-z .'-]*?\s+email\b", q, re.IGNORECASE))
+    if _USER_ATTR_WORKSPACE.search(q):
+        return bool(_PRONOUN_PATTERN.search(q)
+                    or re.search(r"['’]s\s+(?:workspace|company)|\b(?:workspace|company)\s+(?:of|for)\b", q, re.IGNORECASE)
+                    or re.search(r"\bwhat\s+is\s+([A-Za-z][A-Za-z .'-]*?)['’]s\s+workspace\b", q, re.IGNORECASE))
+    if _USER_ATTR_ROLE.search(q):
+        return bool(_PRONOUN_PATTERN.search(q)
+                    or re.search(r"['’]s\s+role|\brole\s+(?:of|for)\b", q, re.IGNORECASE))
+    if _USER_ATTR_PROFILE.search(q):
+        return True
+    return False
+
+
+def _user_attribute_answer(question: str, history: list = None):
+    """Answer questions about a user's email, workspace, role, or profile with exact DB records."""
+    if not is_person_attribute_question(question):
+        return None
+
+    attr = None
+    if _USER_ATTR_EMAIL.search(question):
+        attr = "email"
+    elif _USER_ATTR_WORKSPACE.search(question):
+        attr = "workspace"
+    elif _USER_ATTR_ROLE.search(question):
+        attr = "role"
+    elif _USER_ATTR_PROFILE.search(question):
+        attr = "profile"
+
+    if not attr:
+        return None
+
+    has_pronoun = bool(_PRONOUN_PATTERN.search(question))
+    person = None
+    if not has_pronoun:
+        m = re.search(r"\b(?:who\s+is|tell\s+me\s+about|profile\s+of|details\s+of)\s+(?:the\s+)?([A-Za-z][A-Za-z .\'’-]*?)(?=[?.!,]|$)", question, re.IGNORECASE)
+        if m:
+            person = m.group(1).strip()
+        if not person:
+            m = re.search(r"\b([A-Za-z][A-Za-z .\'’-]*?)[\'’]s\s+(?:email|workspace|company|role|profile|job)", question, re.IGNORECASE)
+            if m:
+                person = m.group(1).strip()
+        if not person:
+            m = re.search(r"\b(?:email|workspace|company|role|profile|details)\s+(?:of|for)\s+([A-Za-z][A-Za-z .\'’-]*?)(?=[?.!,]|$)", question, re.IGNORECASE)
+            if m:
+                person = m.group(1).strip()
+        if not person:
+            m = re.search(r"\b([A-Za-z][A-Za-z .\'’-]{2,30}?)\s+(?:email|workspace|company|role)\b", question, re.IGNORECASE)
+            if m:
+                candidate = m.group(1).strip()
+                words = candidate.split()
+                stops = {"what", "which", "who", "tell", "show", "give", "is", "are", "was", "the", "a", "an"}
+                while words and words[0].lower() in stops:
+                    words.pop(0)
+                if words:
+                    person = " ".join(words)
+
+    if person:
+        person = re.sub(r"[\'’]s?$", "", person).strip(" .'-")
+        if _PRONOUN_PATTERN.fullmatch(person):
+            has_pronoun = True
+            person = None
+
+    if (has_pronoun or not person) and history:
+        for turn in reversed(history):
+            ans = turn.get("answer", "")
+            m_ans = re.search(r"^(?:Yes|No),\s+([A-Za-z]+(?:\s+[A-Za-z]+){0,3}?)\s+(?:has|have|works|worked|is|was|did|logged)\b", ans)
+            if not m_ans:
+                m_ans = re.search(r"^([A-Za-z]+(?:\s+[A-Za-z]+){0,3}?)[\'’]s\s+(?:email|workspace|company|role|tasks?|logged)", ans)
+            if not m_ans:
+                m_ans = re.search(r"^([A-Za-z]+(?:\s+[A-Za-z]+){0,3}?)\s+is\s+a\b", ans)
+            if m_ans:
+                person = m_ans.group(1).strip()
+                break
+            q = turn.get("question", "")
+            m_q = re.search(r"\b(?:email|workspace|company|role|tasks?)\s+(?:of|for)\s+([A-Za-z][A-Za-z .\'’-]*?)(?=[?.!,]|$)", q, re.IGNORECASE)
+            if not m_q:
+                m_q = re.search(r"\b([A-Za-z][A-Za-z .\'’-]*?)[\'’]s", q)
+            if not m_q:
+                m_q = re.search(r"\b(?:did|does|do|has|have|is|was)\s+([A-Za-z][A-Za-z .\'’-]*?)\s+(?:work|worked|do|logged|assigned)\b", q, re.IGNORECASE)
+            if not m_q:
+                m_q = re.search(r"\b(?:who\s+is|tell\s+me\s+about)\s+([A-Za-z][A-Za-z .\'’-]*?)(?=[?.!,]|$)", q, re.IGNORECASE)
+            if m_q:
+                cand = re.sub(r"[\'’]s?$", "", m_q.group(1)).strip(" .'-")
+                if not _PRONOUN_PATTERN.fullmatch(cand):
+                    person = cand
+                    break
+
+    if not person:
+        return None
+
+    from . import query_correction
+    corrected_person = query_correction.correct_query(person)
+    tokens = re.findall(r"[A-Za-z0-9]+", corrected_person)
+    if not tokens:
+        tokens = re.findall(r"[A-Za-z0-9]+", person)
+    if not tokens:
+        return None
+
+    db = mongo_service.get_db()
+    started = time.perf_counter()
+    name_fields = ("name", "fullName", "firstName", "lastName", "username", "displayName", "email")
+    condition = {"$or": [{fld: re.compile(re.escape(tokens[0]), re.IGNORECASE)} for fld in name_fields]}
+    user = db["users"].find_one(condition)
+    if not user and len(tokens) > 1:
+        condition = {"$or": [{fld: re.compile(re.escape(tokens[-1]), re.IGNORECASE)} for fld in name_fields]}
+        user = db["users"].find_one(condition)
+
+    if not user:
+        direct_answer = f"I couldn't find a user named '{person}'."
+        return ExactResult(
+            collection="users", total=0, records=[], conditions=f"user = {person}",
+            complete=True, source="planner", operation="lookup",
+            direct_answer=direct_answer, timings={"db": round((time.perf_counter() - started) * 1000)}
+        )
+
+    canonical_name = user.get("name") or user.get("displayName") or f"{user.get('firstName', '')} {user.get('lastName', '')}".strip() or person
+    email = user.get("email")
+    role = user.get("role") or user.get("title") or user.get("jobTitle") or "employee"
+    ws_name = None
+    if user.get("lastActiveWorkspace"):
+        ws_id = user["lastActiveWorkspace"]
+        try:
+            ws = db["workspaces"].find_one({"_id": ws_id})
+            if not ws:
+                ws = db["workspaces"].find_one({"_id": ObjectId(str(ws_id))})
+            if ws:
+                ws_name = ws.get("name") or ws.get("title")
+        except Exception:
+            pass
+
+    if attr == "email":
+        direct_answer = f"{canonical_name}'s email address is {email}." if email else f"{canonical_name} does not have an email address recorded."
+    elif attr == "workspace":
+        direct_answer = f"{canonical_name}'s workspace is {ws_name}." if ws_name else f"{canonical_name} does not have a workspace recorded."
+    elif attr == "role":
+        direct_answer = f"{canonical_name}'s role is {role}."
+    elif attr == "profile":
+        parts = [f"{canonical_name} is a {role}"]
+        if ws_name:
+            parts.append(f"at {ws_name}")
+        ans_str = " ".join(parts) + "."
+        if email:
+            ans_str += f" Email: {email}."
+        direct_answer = ans_str
+
+    record = {
+        "document_id": str(user.get("_id", "")),
+        "name": canonical_name,
+        "text": f"Name: {canonical_name}; Email: {email or 'N/A'}; Role: {role}; Workspace: {ws_name or 'N/A'}"
+    }
+    return ExactResult(
+        collection="users", total=1, records=[record], conditions=f"user = {canonical_name}",
+        complete=True, source="planner", operation="lookup",
+        direct_answer=direct_answer, timings={"db": round((time.perf_counter() - started) * 1000)}
+    )
+
+
+_PERSON_LOOKUP_PATTERN = re.compile(
+    r"^(?:who\s+is|tell\s+me\s+about|what\s+do\s+you\s+know\s+about)\s+"
+    r"(?:the\s+)?([A-Za-z][A-Za-z.'’\s-]*?)[?.!]*$",
+>>>>>>> master
     re.IGNORECASE,
 )
 
@@ -525,7 +742,12 @@ def _person_lookup(question: str):
     match = _PERSON_LOOKUP_PATTERN.fullmatch(question.strip())
     if not match:
         return None
+<<<<<<< HEAD
     name = match.group(1).strip()
+=======
+    raw_name = match.group(1).strip()
+    name = re.sub(r"['’]s?$", "", raw_name).strip(" .'-")
+>>>>>>> master
     tokens = re.findall(r"[A-Za-z0-9]+", name)
     if not tokens:
         return None
@@ -542,8 +764,11 @@ def _person_lookup(question: str):
     if not total:
         return None
 
+<<<<<<< HEAD
     # The question is singular; a small cap avoids flooding the answer prompt if
     # a common first name matches multiple users.
+=======
+>>>>>>> master
     docs = list(users.find(condition).limit(min(settings.STRUCT_MAX_RECORDS, 10)))
     resolver = _exec_resolver(build_catalog())
     resolver.prefetch("users", docs, infer=False)
@@ -554,10 +779,41 @@ def _person_lookup(question: str):
         records.append({"document_id": converted.primary_id,
                         "name": converted.display_name,
                         "text": "; ".join(body)[:MAX_RECORD_CHARS]})
+<<<<<<< HEAD
+=======
+
+    direct_ans = ""
+    if docs:
+        first = docs[0]
+        c_name = first.get("name") or first.get("displayName") or name
+        role = first.get("role") or first.get("jobTitle") or "employee"
+        ws_name = None
+        if first.get("lastActiveWorkspace"):
+            try:
+                ws = db["workspaces"].find_one({"_id": first["lastActiveWorkspace"]})
+                if not ws:
+                    ws = db["workspaces"].find_one({"_id": ObjectId(str(first["lastActiveWorkspace"]))})
+                if ws:
+                    ws_name = ws.get("name") or ws.get("title")
+            except Exception:
+                pass
+        parts = [f"{c_name} is a {role}"]
+        if ws_name:
+            parts.append(f"at {ws_name}")
+        ans_s = " ".join(parts) + "."
+        if first.get("email"):
+            ans_s += f" Email: {first['email']}."
+        direct_ans = ans_s
+
+>>>>>>> master
     result = ExactResult(
         collection="users", total=total, records=records,
         conditions=f"profile name matches '{name}'", complete=total <= len(records),
         source="planner", operation="list",
+<<<<<<< HEAD
+=======
+        direct_answer=direct_ans,
+>>>>>>> master
         timings={"db": round((time.perf_counter() - started) * 1000)},
     )
     result.context = _context(result)
@@ -587,8 +843,106 @@ def _select_lines(lines: list, labels: list) -> list:
     return kept or lines
 
 
+<<<<<<< HEAD
 def execute(plan: dict, catalog: dict, source: str):
     started = time.perf_counter()
+=======
+def _without_logged_time(doc: dict) -> dict:
+    """Drop logged-time fields so task/project details do not leak time entries."""
+    dropped = {"loggedtime", "logged_time", "loggedtimes", "logged_times",
+               "timelog", "time_log", "timelogs", "time_logs"}
+    return {key: value for key, value in doc.items() if str(key).lower() not in dropped}
+
+
+def _execute_tool_action(plan: dict, catalog: dict, source: str, include_logged_time: bool = False):
+    """Execute a predefined multi-collection aggregation pipeline tool."""
+    action = plan.get("action")
+    db = mongo_service.get_db()
+
+    if action == "logged_time":
+        person = plan.get("person")
+        project = plan.get("project")
+        date_str = plan.get("date")
+        extremum = plan.get("extremum")
+        parts = []
+        if person:
+            parts.append(f"{person}'s")
+        if extremum:
+            parts.append(extremum)
+        parts.append("logged time")
+        if project:
+            parts.append(f"in {project}")
+        if date_str:
+            parts.append(f"on {date_str}")
+        synthetic_q = " ".join(parts)
+        res = _logged_time_answer(synthetic_q)
+        if res is not None:
+            return res
+
+    elif action == "employee_work":
+        person = plan.get("person")
+        project = plan.get("project")
+        status = plan.get("status")
+        verify = plan.get("verify", False)
+        parts = []
+        if verify:
+            parts.append("does")
+        parts.append(person or "employee")
+        parts.append("work on")
+        if project:
+            parts.append(f"{project} project")
+        if status:
+            parts.append(status)
+        synthetic_q = " ".join(parts)
+        res = _employee_work_status(synthetic_q)
+        if res is not None:
+            return res
+
+    elif action == "project_team":
+        project = plan.get("project")
+        board_ids = _ids_by_name("boards", project) if project else []
+        if board_ids:
+            cursor = db["boards"].find({"_id": {"$in": _id_variants(board_ids)}})
+            docs = list(cursor)
+            if docs:
+                records = [{"document_id": str(d["_id"]), "name": d.get("name") or "Project", "text": f"Name: {d.get('name')}"} for d in docs]
+                res = ExactResult(
+                    collection="boards", total=len(docs), records=records, conditions=f"project = {project}",
+                    complete=True, source="planner", operation="list"
+                )
+                _project_team_details(res)
+                return res
+
+    elif action == "leave_records":
+        person = plan.get("person")
+        leave_type = plan.get("leave_type")
+        parts = ["leave"]
+        if leave_type:
+            parts.append(leave_type)
+        if person:
+            parts.append(f"for {person}")
+        synthetic_q = " ".join(parts)
+        res = _leave_time_answer(synthetic_q)
+        if res is not None:
+            return res
+        res = _leave_types_answer(synthetic_q)
+        if res is not None:
+            return res
+
+    return None
+
+
+def execute(plan: dict, catalog: dict, source: str, include_logged_time: bool = False):
+    started = time.perf_counter()
+    action = plan.get("action")
+    if action:
+        res = _execute_tool_action(plan, catalog, source, include_logged_time)
+        if res is not None:
+            res.timings = {"db": round((time.perf_counter() - started) * 1000)}
+            return res
+        return None
+
+>>>>>>> master
     name = plan.get("collection")
     if not name or mongo_service.is_blocked_collection(name) or name not in catalog:
         return None
@@ -645,6 +999,11 @@ def execute(plan: dict, catalog: dict, source: str):
     labels = _labels_for(plan.get("show") or [])
     records = []
     for doc in docs:
+<<<<<<< HEAD
+=======
+        if not include_logged_time:
+            doc = _without_logged_time(doc)
+>>>>>>> master
         conv = document_converter.convert_document(name, doc, resolver)
         body = conv.lines[2:] if len(conv.lines) > 2 else conv.lines       # drop "Document ID" + summary lines
         if labels:
@@ -685,11 +1044,22 @@ _WORK_INTENT = re.compile(
 _PROJECT_INTENT = re.compile(r"\bprojects?\b", re.IGNORECASE)
 _TASK_INTENT = re.compile(r"\b(?:tasks?|work|stuff|assignments?|deliverables?)\b", re.IGNORECASE)
 _TASK_COLLECTION_INTENT = re.compile(r"\b(?:tasks?|assignments?|deliverables?)\b", re.IGNORECASE)
+<<<<<<< HEAD
 _NAME_STOPS = {"what", "which", "who", "how", "many", "show", "list", "tell", "give", "me", "the", "is", "are", "was", "were",
                "has", "have", "did", "does", "do", "all", "every", "employee", "employees", "user", "users",
                "member", "members", "completed", "complete", "done",
                "finished", "pending", "open", "active", "current", "task", "tasks", "project", "projects", "work",
                "stuff", "status", "of", "for", "by", "assigned", "employee", "user", "member", "him", "her", "them"}
+=======
+_NAME_STOPS = {"what", "which", "who", "whom", "whose", "where", "how", "many", "show", "list", "tell", "give", "me", "the", "is", "are", "was", "were",
+               "has", "have", "had", "did", "does", "do", "all", "every", "any", "employee", "employees", "user", "users",
+               "member", "members", "completed", "complete", "done",
+               "finished", "pending", "open", "active", "current", "task", "tasks", "project", "projects", "work",
+               "stuff", "status", "of", "for", "by", "assigned", "him", "her", "them",
+               "time", "times", "logged", "log", "logs", "hour", "hours", "timesheet", "timesheets",
+               "least", "most", "less", "more", "fewer", "fewest", "highest", "lowest",
+               "on", "in", "at", "to", "from", "with", "about", "into", "through", "during", "a", "an", "whether", "if"}
+>>>>>>> master
 
 
 def _employee_name_from_question(question: str):
@@ -702,17 +1072,60 @@ def _employee_name_from_question(question: str):
         r"\b(?:assigned\s+to|for|of|by)\s+([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,3}?)(?=\s+(?:(?:are|is|has|have|did|does|do)\s+)?(?:tasks?|projects?|work|stuff|status|assignments?|deliverables?|completed?|done|finished|pending|in[- ]progress)\b|['’]s\b|[?.!,]|$)",
     )
     for pattern in patterns:
+<<<<<<< HEAD
         match = re.search(pattern, question, re.IGNORECASE)
         if not match:
             continue
         candidate = re.sub(r"['’]s$", "", match.group(1), flags=re.IGNORECASE)
+=======
+        for match in re.finditer(pattern, question, re.IGNORECASE):
+            candidate = re.sub(r"['’]s$", "", match.group(1), flags=re.IGNORECASE)
+            words = candidate.split()
+            while words and words[0].lower() in _NAME_STOPS:
+                words.pop(0)
+            while words and words[-1].lower() in _NAME_STOPS:
+                words.pop()
+            if words:
+                return " ".join(words[:4]).strip(" .'-")
+    return None
+
+
+def _target_project_from_question(question: str, person_name: str = None):
+    """Extract a target project or board name if specified in the question."""
+    patterns = (
+        r"\b(?:in|on|at|for)\s+(?:the\s+)?(.+?)\s+(?:project|board|task|card)\b",
+        r"\b(?:in|on|at|for)\s+(?:the\s+)?(?:project|board|task|card)\s+(.+?)(?=[?.!,]|$)\b",
+        r"\b(?:project|board|task|card)\s+(.+?)(?=[?.!,]|$)\b",
+        r"\b(?:in|on|at|for)\s+(?:the\s+)?([A-Za-z0-9_ -]+?)(?=[?.!,]|$)\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, question, re.IGNORECASE)
+        if not match:
+            continue
+        raw = match.group(1).strip(" .'-")
+        candidate = re.sub(r"^(?:the\s+)?(?:project|board|task|card)\s+", "", raw, flags=re.IGNORECASE)
+        candidate = re.sub(r"\s+(?:project|board|task|card)$", "", candidate, flags=re.IGNORECASE).strip(" .'-")
+        if person_name:
+            candidate = re.sub(rf"^{re.escape(person_name)}\s*", "", candidate, flags=re.IGNORECASE).strip(" .'-")
+>>>>>>> master
         words = candidate.split()
         while words and words[0].lower() in _NAME_STOPS:
             words.pop(0)
         while words and words[-1].lower() in _NAME_STOPS:
             words.pop()
+<<<<<<< HEAD
         if words:
             return " ".join(words[:4]).strip(" .'-")
+=======
+        candidate = " ".join(words).strip(" .'-")
+        if not candidate:
+            continue
+        if re.search(r"\b(?:which|what|who|whom|whose|where|how|konsa|konse|kisme)\b", candidate, re.IGNORECASE):
+            continue
+        if person_name and _norm(candidate) == _norm(person_name):
+            continue
+        return candidate
+>>>>>>> master
     return None
 
 
@@ -757,7 +1170,12 @@ def _assigned_work_filter(ids, person_name, completed_only, open_only, collectio
     return query
 
 
+<<<<<<< HEAD
 def _fallback_assigned_work(db, existing, ids, person_name, completed_only, open_only, count_only, personal=False):
+=======
+def _fallback_assigned_work(db, existing, ids, person_name, completed_only, open_only, count_only,
+                            personal=False, include_logged_time=False):
+>>>>>>> master
     """If cards have no matches, try legacy task and subtask collections in order."""
     for collection_name in ("tasks", "subtasks", "subtasknanos"):
         if collection_name not in existing:
@@ -771,6 +1189,11 @@ def _fallback_assigned_work(db, existing, ids, person_name, completed_only, open
         if not personal:
             cursor = cursor.limit(10 if count_only else settings.STRUCT_MAX_RECORDS)
         docs = list(cursor)
+<<<<<<< HEAD
+=======
+        if not include_logged_time:
+            docs = [_without_logged_time(doc) for doc in docs]
+>>>>>>> master
         resolver = _exec_resolver(build_catalog())
         resolver.prefetch(collection_name, docs, infer=False)
         records = []
@@ -822,6 +1245,10 @@ def _employee_work_status(question: str, history: list = None, current_user_id: 
     db = mongo_service.get_db()
     existing = set(db.list_collection_names())
     ids = _id_variants(user_ids)
+<<<<<<< HEAD
+=======
+    include_logged_time = wants_logged_time(question)
+>>>>>>> master
     started = time.perf_counter()
     count_only = bool(re.search(r"\bhow\s+many\b|\bcount\b|\btotal\b", question, re.IGNORECASE))
     completed_only = bool(
@@ -831,6 +1258,120 @@ def _employee_work_status(question: str, history: list = None, current_user_id: 
     )
     open_only = bool(re.search(r"\b(?:not\s+(?:completed?|done)|incomplete|pending|open|active|to[- ]?do|in[- ]progress|in[- ]review|review)\b",
                                question, re.IGNORECASE))
+<<<<<<< HEAD
+=======
+    target_project = _target_project_from_question(question, person_name) or _target_project_from_question(scoped_question, person_name)
+    if target_project:
+        target_board_ids = _ids_by_name("boards", target_project)
+        matching_boards = list(db["boards"].find({"_id": {"$in": _id_variants(target_board_ids)}})) if target_board_ids else []
+        board_title = matching_boards[0].get("name") if matching_boards else target_project
+
+        is_member = any(any(uid in (b.get("members") or []) for uid in ids) for b in matching_boards)
+        b_var = _id_variants(target_board_ids)
+        card_filter = {"board": {"$in": b_var}, "assignees": {"$in": ids}} if b_var else {"_id": {"$in": []}}
+        cards = list(db["cards"].find(card_filter, {"title": 1, "status": 1, "isArchived": 1, "board": 1, "loggedTime": 1}))
+        if not cards and b_var:
+            cards = list(db["cards"].find({"board": {"$in": b_var}, "loggedTime.user": {"$in": ids}},
+                                          {"title": 1, "status": 1, "isArchived": 1, "board": 1, "loggedTime": 1}))
+        if not cards and not is_member and "tasks" in existing and b_var:
+            for coll in ("tasks", "subtasks"):
+                if coll in existing:
+                    found_tasks = list(db[coll].find({"projectId": {"$in": b_var}, "assignedTo": {"$in": ids}}, {"title": 1, "name": 1, "status": 1}))
+                    if found_tasks:
+                        cards = [{"title": t.get("title") or t.get("name"), "status": t.get("status")} for t in found_tasks]
+                        break
+
+        is_verification = bool(re.search(r"\b(?:does|did|is|has|have|was|were|whether|if)\b", question, re.IGNORECASE))
+        has_worked = bool(cards or is_member)
+        u_doc = db["users"].find_one({"_id": {"$in": ids}}, {"name": 1, "firstName": 1, "lastName": 1})
+        display_person = (u_doc or {}).get("name") or " ".join(filter(None, (
+            (u_doc or {}).get("firstName"), (u_doc or {}).get("lastName")
+        ))) or person_name.title()
+
+        if not matching_boards and not has_worked:
+            # Check if target refers to a specific task / card
+            matching_task_cards = list(db["cards"].find({
+                "title": re.compile(rf"^{re.escape(target_project)}$", re.IGNORECASE)
+            }))
+            if not matching_task_cards:
+                matching_task_cards = list(db["cards"].find({
+                    "title": re.compile(re.escape(target_project), re.IGNORECASE)
+                }))
+            if matching_task_cards:
+                matched_c = matching_task_cards[0]
+                b_doc = db["boards"].find_one({"_id": matched_c.get("board")})
+                if not b_doc:
+                    try:
+                        b_doc = db["boards"].find_one({"_id": ObjectId(str(matched_c.get("board")))})
+                    except Exception:
+                        pass
+                b_title = (b_doc.get("name") if b_doc else None) or (b_doc.get("title") if b_doc else None) or "Unknown project"
+                t_user_entries = [e for e in matched_c.get("loggedTime", []) if str(e.get("user")) in [str(i) for i in ids]]
+                t_assigned = any(str(a) in [str(i) for i in ids] for a in matched_c.get("assignees", []))
+                if t_user_entries or t_assigned:
+                    lt_info = f" Records show {len(t_user_entries)} logged-time entries." if t_user_entries else ""
+                    direct_answer = f"Yes, {display_person} works on / has worked on task '{matched_c.get('title')}' under project '{b_title}'.{lt_info}"
+                    return ExactResult(
+                        collection="cards", total=1, records=[{
+                            "document_id": str(matched_c.get("_id", "")),
+                            "name": matched_c.get("title", ""),
+                            "text": f"Project: {b_title}; Task: {matched_c.get('title')}; Status: {matched_c.get('status')}"
+                        }],
+                        conditions=f"user = {person_name}; task = {matched_c.get('title')}",
+                        complete=True, source="planner", operation="lookup",
+                        direct_answer=direct_answer, timings={"db": round((time.perf_counter() - started) * 1000)}
+                    )
+                else:
+                    direct_answer = f"No, {display_person} has not worked on task '{matched_c.get('title')}' under project '{b_title}' (no assigned tasks or logged time found)."
+                    return ExactResult(
+                        collection="cards", total=0, records=[],
+                        conditions=f"user = {person_name}; task = {matched_c.get('title')}",
+                        complete=True, source="planner", operation="lookup",
+                        direct_answer=direct_answer, timings={"db": round((time.perf_counter() - started) * 1000)}
+                    )
+
+        if has_worked:
+            card_lines = []
+            for c in cards:
+                st = str(c.get("status") or "").strip()
+                st_suffix = f" [{st}]" if st else ""
+                card_lines.append(f"- {c.get('title') or 'Untitled'}{st_suffix}")
+            if is_verification:
+                if cards:
+                    direct_answer = f"Yes, {display_person} works on / has worked on project '{board_title}'.\n\nAssigned tasks ({len(cards)}):\n" + "\n".join(card_lines)
+                else:
+                    direct_answer = f"Yes, {display_person} is a member of project '{board_title}' (no specific tasks currently assigned)."
+            else:
+                direct_answer = f"{display_person}'s tasks in project '{board_title}' ({len(cards)}):\n" + "\n".join(card_lines)
+        else:
+            if not matching_boards:
+                direct_answer = f"No project matching '{target_project}' was found (and {display_person} has no assignments in it)."
+            else:
+                direct_answer = f"No, {display_person} has not worked on project '{board_title}' (no assigned tasks or membership found)."
+
+        records = []
+        for c in cards:
+            st = str(c.get("status") or "").strip()
+            records.append({
+                "document_id": str(c.get("_id", "")),
+                "name": c.get("title") or "Untitled task",
+                "text": f"Project: {board_title}; Task: {c.get('title') or 'Untitled'}; Status: {st}"
+            })
+        conditions = f"user = {person_name}; project = {board_title}"
+        return ExactResult(
+            collection="cards",
+            total=len(cards),
+            records=records,
+            conditions=conditions,
+            complete=True,
+            source="employee-id",
+            operation="list",
+            notes=[f"Checked work and assignments for {person_name} in project '{board_title}'."],
+            timings={"db": round((time.perf_counter() - started) * 1000)},
+            direct_answer=direct_answer,
+        )
+
+>>>>>>> master
     is_project_query = bool(_PROJECT_INTENT.search(scoped_question) and not _TASK_COLLECTION_INTENT.search(scoped_question))
     records, total, collection_name = [], 0, "boards" if is_project_query else "cards"
     docs = []
@@ -872,7 +1413,13 @@ def _employee_work_status(question: str, history: list = None, current_user_id: 
             card_filter["isArchived"] = {"$ne": True}
         total = _count(db["cards"], card_filter)
         projection = {"title": 1, "description": 1, "board": 1, "status": 1, "isArchived": 1,
+<<<<<<< HEAD
                       "dueDate": 1, "createdAt": 1, "loggedTime": 1, "assignees": 1}
+=======
+                      "dueDate": 1, "createdAt": 1, "assignees": 1}
+        if include_logged_time:
+            projection["loggedTime"] = 1
+>>>>>>> master
         cursor = db["cards"].find(card_filter, projection).sort("_id", -1)
         if not personal:
             cursor = cursor.limit(10 if count_only else settings.STRUCT_MAX_RECORDS)
@@ -898,6 +1445,10 @@ def _employee_work_status(question: str, history: list = None, current_user_id: 
     if not is_project_query and total == 0:
         fallback = _fallback_assigned_work(
             db, existing, ids, person_name, completed_only, open_only, count_only, personal,
+<<<<<<< HEAD
+=======
+            include_logged_time=include_logged_time,
+>>>>>>> master
         )
         if fallback is not None:
             collection_name, total, records, fallback_docs = fallback
@@ -969,7 +1520,11 @@ def _employee_work_status(question: str, history: list = None, current_user_id: 
                 logged = doc.get("loggedTime") or []
                 if isinstance(logged, dict):
                     logged = [logged]
+<<<<<<< HEAD
                 if logged:
+=======
+                if include_logged_time and logged:
+>>>>>>> master
                     lines.append("  Logged time entries:")
                     for entry in logged:
                         if not isinstance(entry, dict):
@@ -1007,7 +1562,13 @@ def _employee_work_status(question: str, history: list = None, current_user_id: 
 _LOGGED_TIME_PATTERN = re.compile(
     r"\b(?:logged[\s_-]*time|time[\s_-]*logged|timesheets?|time[\s_-]*(?:logs?|entries|tracking|tracked|spent)|"
     r"work[\s_-]*logs?|hours?[\s_-]*(?:logged|worked|tracked|spent|billable)|"
+<<<<<<< HEAD
     r"(?:logged|worked|tracked|spent)[\s_-]*hours?|billed[\s_-]*time|billable[\s_-]*hours)\b",
+=======
+    r"(?:logged|worked|tracked|spent)[\s_-]*hours?|billed[\s_-]*time|billable[\s_-]*hours|"
+    r"(?:time[\s_-]*log|time[\s_-]*logs|time[\s_-]*entry|time[\s_-]*entries)|"
+    r"(?:ghante|ghanta)[\s_-]*(?:logged|worked|spent)?)\b",
+>>>>>>> master
     re.IGNORECASE,
 )
 _LEAVE_TIME_PATTERN = re.compile(
@@ -1019,12 +1580,29 @@ _LOGGED_TIME_GENERIC = {
     "all work logs", "board", "boards", "each", "each board", "each project", "every",
     "every board", "every project", "hour", "hours", "logged time", "loggedtime", "project",
     "projects", "time entries", "time entry", "time logged", "timesheet", "timesheets", "total",
+<<<<<<< HEAD
     "total hours", "total logged time", "work log", "work logs",
+=======
+    "total hours", "total logged time", "work log", "work logs", "task", "tasks", "card", "cards",
+>>>>>>> master
 }
 _LOGGED_TIME_STOPS = _NAME_STOPS | {
     "all", "calculate", "compute", "each", "entries", "entry", "every", "full", "give", "hour", "hours",
     "list", "log", "logged", "logs", "show", "sum", "time", "timesheet", "timesheets", "total", "work",
+<<<<<<< HEAD
     "worked", "working",
+=======
+    "worked", "working", "least", "most", "highest", "lowest", "minimum", "maximum", "min", "max",
+    "less", "more", "fewer", "fewest", "greater", "higher", "lower",
+    "smallest", "largest", "shortest", "longest", "latest", "earliest", "first", "last",
+    "my", "mine", "myself", "me", "i", "we", "our", "ours", "ourselves", "you", "your", "yours", "yourself",
+    "he", "him", "his", "himself", "she", "her", "hers", "herself", "they", "them", "their", "theirs", "themselves",
+    "has", "have", "had", "does", "do", "did", "is", "are", "was", "were", "gets", "got", "takes", "took",
+    "sab", "sabse", "sase", "thoda", "thodi", "thode", "kam", "jyada", "jayda", "zyada", "jada", "bada", "badi", "bade",
+    "chhota", "chota", "chhoti", "choti", "chote", "chhote", "adhiktam", "nyuntam",
+    "ka", "ki", "ke", "ko", "se", "ne", "me", "mein", "par", "pe",
+    "user", "member", "employee", "users", "members", "employees",
+>>>>>>> master
 }
 
 _LEAVE_TYPE_PATTERN = re.compile(
@@ -1042,6 +1620,7 @@ _LEAVE_TIME_QUESTION_PATTERN = re.compile(
     r"(?:logged|worked|tracked|spent)[\s_-]*hours?)\b",
     re.IGNORECASE,
 )
+<<<<<<< HEAD
 
 
 def is_logged_time_question(question: str) -> bool:
@@ -1051,6 +1630,103 @@ def is_logged_time_question(question: str) -> bool:
         return False
     if _LOGGED_TIME_PATTERN.search(text):
         return True
+=======
+# Superlative leave-count queries: "who takes most leaves", "who takes least full-day leaves",
+# "which employee takes leave most frequently", "highest number of full-day leaves", etc.
+# Strategy: require a superlative keyword AND a leave keyword in the same query.
+_LEAVE_COUNT_SUPERLATIVE_PATTERN = re.compile(
+    r"(?:"
+    # Superlative keyword
+    r"\b(?:most|least|highest|lowest|maximum|minimum|max|min|fewest|fewer|more|less|very\s+most|very\s+least|most\s+frequently|least\s+frequently|more\s+frequently)\b"
+    r".*?"
+    # Leave keyword
+    r"\b(?:leaves?|leave\s+days?|(?:full|short|half)[- ]?(?:day\s+)?leaves?)\b"
+    r"|"
+    # Leave keyword followed by superlative
+    r"\b(?:leaves?|leave\s+days?|(?:full|short|half)[- ]?leave)\b"
+    r".*?"
+    r"\b(?:most\s+frequently|least\s+frequently|more\s+frequently|most|least|highest|lowest|maximum|minimum|fewest|fewer|less|more)\b"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+_MONTH_MAP = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "september": 9, "oct": 10, "october": 10,
+    "nov": 11, "november": 11, "dec": 12, "december": 12,
+}
+
+
+def _extract_date_from_question(text: str, anchor=None):
+    """Extract (year, month, day) from question text if present (supports relative dates)."""
+    if not text:
+        return None
+    from datetime import datetime, timedelta
+    anchor = anchor or datetime.now()
+
+    # Relative date expressions
+    if re.search(r"\b(?:day\s+before\s+yesterday|parso)\b", text, re.IGNORECASE):
+        d = anchor - timedelta(days=2)
+        return d.year, d.month, d.day
+    if re.search(r"\b(?:yesterday|kal\s+(?:ka|ki|ke|ko))\b", text, re.IGNORECASE) or (
+        re.search(r"\bkal\b", text, re.IGNORECASE) and re.search(r"\b(?:worked|did|tha|the|thi)\b", text, re.IGNORECASE)
+    ):
+        d = anchor - timedelta(days=1)
+        return d.year, d.month, d.day
+    if re.search(r"\b(?:today|aaj)\b", text, re.IGNORECASE):
+        return anchor.year, anchor.month, anchor.day
+
+    # 1. YYYY-MM-DD or YYYY/MM/DD
+    m = re.search(r"\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b", text)
+    if m:
+        return int(m.group(1)), int(m.group(2)), int(m.group(3))
+    # 2. Month word + day (e.g. August 19, Aug 19, Aug 19th, August 19 2026)
+    m = re.search(r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)[.,\s]+(\d{1,2})(?:st|nd|rd|th)?(?:\s*,?\s*(\d{4}))?\b", text, re.IGNORECASE)
+    if m:
+        month = _MONTH_MAP[m.group(1).lower()[:3]]
+        day = int(m.group(2))
+        year = int(m.group(3)) if m.group(3) else None
+        return year, month, day
+    # 3. Day + month word (e.g. 19 August, 19th Aug 2026)
+    m = re.search(r"\b(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\s*,?\s*(\d{4}))?\b", text, re.IGNORECASE)
+    if m:
+        day = int(m.group(1))
+        month = _MONTH_MAP[m.group(2).lower()[:3]]
+        year = int(m.group(3)) if m.group(3) else None
+        return year, month, day
+    # 4. MM-DD or M-D (e.g. 8-19, 08-19, 8/19)
+    m = re.search(r"\b(?:on\s+|date\s+)?(\d{1,2})[-/](\d{1,2})(?:[-/](\d{2,4}))?\b", text, re.IGNORECASE)
+    if m:
+        num1, num2 = int(m.group(1)), int(m.group(2))
+        year = int(m.group(3)) if m.group(3) else None
+        if year and year < 100:
+            year += 2000
+        if 1 <= num1 <= 12 and 1 <= num2 <= 31:
+            return year, num1, num2
+        if 1 <= num2 <= 12 and 1 <= num1 <= 31:
+            return year, num2, num1
+    return None
+
+
+def is_logged_time_question(question: str) -> bool:
+    """True for logged-time / timesheet / hours-worked questions, and superlative leave-count queries."""
+    text = " ".join((question or "").split())
+    if not text:
+        return False
+    # Superlative leave-count queries ("who takes most leaves") are routed via
+    # _leave_time_answer (not _logged_time_answer) but we still need this to
+    # return True so the caller in rag_service routes them to try_structured.
+    if _LEAVE_COUNT_SUPERLATIVE_PATTERN.search(text):
+        return True
+    if _LEAVE_TIME_PATTERN.search(text):
+        return False
+    if _LOGGED_TIME_PATTERN.search(text):
+        return True
+    if _extract_date_from_question(text) and re.search(r"\b(?:work|worked|working|project|projects|task|tasks|logged|hours?)\b", text, re.IGNORECASE):
+        return True
+>>>>>>> master
     if not re.search(r"\bhours?\b", text, re.IGNORECASE):
         return False
     return bool(re.search(
@@ -1059,6 +1735,7 @@ def is_logged_time_question(question: str) -> bool:
     ))
 
 
+<<<<<<< HEAD
 def _logged_time_person_candidate(question: str):
     patterns = (
         r"\b([A-Za-z][A-Za-z .'-]*?)['’]s\s+(?:all\s+|total\s+)?"
@@ -1081,23 +1758,107 @@ def _logged_time_person_candidate(question: str):
         candidate = " ".join(words).strip(" .'-")
         if candidate and _norm(candidate) not in {_norm(x) for x in _LOGGED_TIME_GENERIC}:
             return candidate
+=======
+def wants_logged_time(question: str) -> bool:
+    """Whether the user explicitly asked for logged time / hours in this turn."""
+    text = " ".join((question or "").split())
+    if not text:
+        return False
+    if _LOGGED_TIME_PATTERN.search(text) or _LEAVE_TIME_QUESTION_PATTERN.search(text):
+        return True
+    return bool(re.search(r"\b(?:hours?|minutes?)\b", text, re.IGNORECASE))
+
+
+_SUPERLATIVE_REGEX = (
+    r"(?:least|lowest|minimum|min|smallest|shortest|less|fewer|fewest|"
+    r"most|highest|maximum|max|largest|biggest|longest|more|"
+    r"sabse\s*(?:thoda|kam|chhota|chota|nyuntam|jayda|jyada|zyada|jada|bada|adhiktam)|"
+    r"sase\s*(?:thoda|kam|chhota|chota|nyuntam|jayda|jyada|zyada|jada|bada|adhiktam)|"
+    r"kam\s*se\s*kam|jyada\s*se\s*jyada|jayda\s*se\s*jayda|thoda|kam|jyada|jayda|zyada)"
+)
+
+_LOGGED_TIME_REGEX = (
+    r"(?:logged[\s_-]*time|loggedtime|time[\s_-]*logged|hours|ghante|ghanta|"
+    r"timesheets?|work[\s_-]*logs?|time[\s_-]*(?:logs?|entries|entry))"
+)
+
+
+def _clean_person(raw: str) -> str | None:
+    if not raw:
+        return None
+    words = raw.split()
+    while words and words[0].lower() in _LOGGED_TIME_STOPS:
+        words.pop(0)
+    while words and words[-1].lower() in _LOGGED_TIME_STOPS:
+        words.pop()
+    if words and words[-1].lower().endswith('s') and not words[-1].lower().endswith('ss') and len(words[-1]) > 3:
+        words[-1] = re.sub(r"(?:['’]s|s)$", "", words[-1], flags=re.IGNORECASE)
+    candidate = " ".join(words).strip(" .'-")
+    if candidate and _norm(candidate) not in {_norm(x) for x in _LOGGED_TIME_GENERIC} and candidate.lower() not in _LOGGED_TIME_STOPS:
+        return candidate
+    return None
+
+
+def _logged_time_person_candidate(question: str):
+    patterns = (
+        r"(?:^|\b(?:in|on|across|me|mein)\s+.*?|\b(?:user|member|employee)\s+)\b(?!sabse\b|sase\b)([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2})(?:['’]s\s+ka|['’]s|ka|ki|ke|ko|se)?\s+(?:all\s+|total\s+)?" + f"(?:{_SUPERLATIVE_REGEX}\\s+)?" + _LOGGED_TIME_REGEX + r"\b",
+        r"\b(?!sabse\b|sase\b)([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2})(?:['’]s\s+ka|['’]s|ka|ki|ke|ko|se)\s+(?:all\s+|total\s+)?" + f"(?:{_SUPERLATIVE_REGEX}\\s+)?" + _LOGGED_TIME_REGEX + r"\b",
+        r"\b(?!sabse\b|sase\b)([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2})\s+(?:all\s+|total\s+)?" + f"(?:{_SUPERLATIVE_REGEX}\\s+)" + _LOGGED_TIME_REGEX + r"\b",
+        f"(?:{_SUPERLATIVE_REGEX}\\s+)?" + _LOGGED_TIME_REGEX + r"\s+(?:of|for|by|from|kiska|kiski|kiske)\s+(?:user|member|employee)?\s*(?!sabse\b|sase\b)([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2})(?=\s+(?:in|across|on|from|between|me|mein|ka|ki|ke)\b|[?.!,]|$)",
+        f"(?:{_SUPERLATIVE_REGEX}\\s+)?" + _LOGGED_TIME_REGEX + r"\s+(?:user|member|employee)?\s*(?!sabse\b|sase\b)([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2})\s*(?:ka|ki|ke|ko|se)\b",
+        r"\b(?:of|for|by)\s+(?:user|member|employee)?\s*(?!sabse\b|sase\b)([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2})(?=\s+(?:in|across|on|from|between|me|mein)\b|[?.!,]|$)",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, question, re.IGNORECASE):
+            candidate = _clean_person(match.group(1))
+            if candidate:
+                return candidate
+>>>>>>> master
     return None
 
 
 def _logged_time_project_candidate(question: str, person_name: str = None):
     patterns = (
+<<<<<<< HEAD
         r"\b(?:in|on|across)\s+(?:the\s+)?(?:project\s+|board\s+)?(.+?)"
         r"(?=\s+(?:from|between|by|of|for|with|during)\b|[?.!,]|$)",
         r"\bfor\s+(?:the\s+)?(?:project\s+|board\s+)?(.+?)"
         r"(?=\s+(?:from|between|by|of|with|during)\b|[?.!,]|$)",
+=======
+        r"\b(?:in|on|across)\s+(?:the\s+)?(?:project\s+|board\s+|task\s+|card\s+)?(.+?)(?=\s+(?:from|between|by|of|for|with|during|me|mein)\b|[?.!,]|$)",
+        r"\bfor\s+(?:the\s+)?(?:project\s+|board\s+|task\s+|card\s+)?(.+?)(?=\s+(?:from|between|by|of|with|during|me|mein)\b|[?.!,]|$)",
+        r"\b(?:logged[\s_-]*time|time[\s_-]*logged|time|hours|ghante|logs?|entries)\s+(?:in\s+|pe\s+|par\s+)?(?:the\s+)?(?:project\s+|board\s+|task\s+|card\s+)?(.+?)\s*(?:project|board|task|card)?\s+(?:me|mein)\b",
+        r"^\s*(?:in\s+)?(?:the\s+)?(?:project\s+|board\s+|task\s+|card\s+)?(.+?)\s*(?:project|board|task|card)?\s+(?:me|mein)\b",
+>>>>>>> master
     )
     for pattern in patterns:
         match = re.search(pattern, question, re.IGNORECASE)
         if not match:
             continue
+<<<<<<< HEAD
         candidate = re.sub(r"\s+(?:project|board)$", "", match.group(1).strip(" .'-"), flags=re.IGNORECASE)
         if not candidate or _norm(candidate) in {_norm(x) for x in _LOGGED_TIME_GENERIC}:
             continue
+=======
+        raw = match.group(1).strip(" .'-")
+        candidate = re.sub(r"^(?:the\s+)?(?:project|board|task|card)\s+", "", raw, flags=re.IGNORECASE)
+        candidate = re.sub(r"\s+(?:project|board|task|card)$", "", candidate, flags=re.IGNORECASE).strip(" .'-")
+        candidate = re.sub(r"\s+(?:me|mein|par|pe|ka|ki|ke)$", "", candidate, flags=re.IGNORECASE).strip(" .'-")
+        if person_name:
+            candidate = re.sub(rf"^{re.escape(person_name)}\s*(?:ka|ki|ke|ko|se)?\s*", "", candidate, flags=re.IGNORECASE).strip(" .'-")
+        words = candidate.split()
+        while words and words[0].lower() in _LOGGED_TIME_STOPS:
+            words.pop(0)
+        while words and words[-1].lower() in _LOGGED_TIME_STOPS:
+            words.pop()
+        candidate = " ".join(words).strip(" .'-")
+        if not candidate or _norm(candidate) in {_norm(x) for x in _LOGGED_TIME_GENERIC}:
+            continue
+        if re.search(r"\b(?:which|what|who|whom|whose|where|konsa|konse|kisme)\b", candidate, re.IGNORECASE):
+            continue
+        if _extract_date_from_question(candidate):
+            continue
+>>>>>>> master
         if person_name and _norm(candidate) == _norm(person_name):
             continue
         return candidate
@@ -1160,6 +1921,24 @@ def _leave_time_empty(person_name: str | None, leave_type: str | None, note: str
     )
 
 
+<<<<<<< HEAD
+=======
+def _leave_board_ids(db) -> set:
+    """Return ids for the dedicated Leave project(s), not every card with 'leave' in a title."""
+    if "boards" not in set(db.list_collection_names()):
+        return set()
+    ids = set()
+    for board in db["boards"].find({}, {"name": 1, "project": 1}):
+        label = _norm(board.get("name") or board.get("project") or "")
+        if (label in {"leave", "leaves"}
+                or label.startswith("leave ")
+                or label.endswith(" leave")
+                or label.endswith(" leaves")):
+            ids.add(str(board["_id"]))
+    return ids
+
+
+>>>>>>> master
 def _leave_time_answer(question: str, history: list = None, current_user_id: str = None,
                        is_admin: bool = False):
     """Logged-time answer for leave tasks (Full Leave / Short Leave / Halfday Leave)
@@ -1167,11 +1946,21 @@ def _leave_time_answer(question: str, history: list = None, current_user_id: str
 
     Filters cards by leave-task title and by the user's loggedTime entries.
     When no specific leave type is named, matches any card whose title contains "leave".
+<<<<<<< HEAD
     """
     text = " ".join((question or "").split())
     if not _LEAVE_TIME_QUESTION_PATTERN.search(text):
         return None
     if not (_LEAVE_TYPE_PATTERN.search(text) or re.search(r"\bleave\b", text, re.IGNORECASE)):
+=======
+    Also handles superlative queries: "who takes most/least leaves".
+    """
+    text = " ".join((question or "").split())
+    is_superlative = bool(_LEAVE_COUNT_SUPERLATIVE_PATTERN.search(text))
+    if not is_superlative and not _LEAVE_TIME_QUESTION_PATTERN.search(text):
+        return None
+    if not (_LEAVE_TYPE_PATTERN.search(text) or re.search(r"\bleaves?\b", text, re.IGNORECASE)):
+>>>>>>> master
         return None
 
     leave_type = _leave_type_from_question(text)
@@ -1179,6 +1968,10 @@ def _leave_time_answer(question: str, history: list = None, current_user_id: str
     title_pattern = re.compile(re.escape(leave_type), re.IGNORECASE) if leave_type else re.compile(r"leave", re.IGNORECASE)
     personal = bool(current_user_id and re.search(r"\b(?:my|mine|myself)\b", text, re.IGNORECASE))
     requested_person = None if personal else _logged_time_person_candidate(text)
+<<<<<<< HEAD
+=======
+    target_date = _extract_date_from_question(text)
+>>>>>>> master
 
     db = mongo_service.get_db()
     person_name, person_ids = None, []
@@ -1216,6 +2009,12 @@ def _leave_time_answer(question: str, history: list = None, current_user_id: str
 
     # Find leave task cards: title contains the leave type (e.g. "Full Leave") or any "leave" task.
     card_flt = {"title": title_pattern, "loggedTime.0": {"$exists": True}}
+<<<<<<< HEAD
+=======
+    leave_board_ids = _leave_board_ids(db)
+    if leave_board_ids:
+        card_flt["board"] = {"$in": _id_variants(list(leave_board_ids))}
+>>>>>>> master
     if person_ids:
         card_flt["loggedTime.user"] = {"$in": person_ids}
 
@@ -1243,6 +2042,29 @@ def _leave_time_answer(question: str, history: list = None, current_user_id: str
             user_id = _logged_time_entry_user(entry)
             if person_ids and user_id not in {str(value) for value in person_ids}:
                 continue
+<<<<<<< HEAD
+=======
+            if target_date:
+                t_year, t_month, t_day = target_date
+                d_val = entry.get("date") or entry.get("createdAt")
+                if not d_val:
+                    continue
+                e_year, e_month, e_day = None, None, None
+                if hasattr(d_val, "year") and hasattr(d_val, "month") and hasattr(d_val, "day"):
+                    e_year, e_month, e_day = d_val.year, d_val.month, d_val.day
+                elif isinstance(d_val, str):
+                    m_d = re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", d_val)
+                    if m_d:
+                        e_year, e_month, e_day = int(m_d.group(1)), int(m_d.group(2)), int(m_d.group(3))
+                    else:
+                        m_d2 = re.search(r"(\d{1,2})[-/](\d{1,2})", d_val)
+                        if m_d2:
+                            e_month, e_day = int(m_d2.group(1)), int(m_d2.group(2))
+                if e_month != t_month or e_day != t_day:
+                    continue
+                if t_year is not None and e_year is not None and e_year != t_year:
+                    continue
+>>>>>>> master
             card_entries.append((entry, user_id))
         if not card_entries:
             continue
@@ -1291,6 +2113,93 @@ def _leave_time_answer(question: str, history: list = None, current_user_id: str
                                    str(item["title"]).casefold(), str(item["date"] or ""), item["document_id"]))
     total_minutes = sum(item["minutes"] for item in matched)
 
+<<<<<<< HEAD
+=======
+    # --- Superlative handling: "who takes most/least leaves" / "who has most/least logged time in leave" ---
+    _sup_min_pat = re.compile(
+        r"\b(?:least|lowest|minimum|min|less|fewer|fewest|smallest|least\s+frequently|"
+        r"sabse\s*(?:thoda|kam|chhota|chota|nyuntam)|"
+        r"sase\s*(?:thoda|kam|chhota|chota|nyuntam)|"
+        r"kam\s*se\s*kam|thoda|kam)\b",
+        re.IGNORECASE,
+    )
+    _sup_max_pat = re.compile(
+        r"\b(?:most|highest|maximum|max|more|largest|biggest|longest|most\s+frequently|"
+        r"sabse\s*(?:jayda|jyada|zyada|jada|bada|adhiktam)|"
+        r"sase\s*(?:jayda|jyada|zyada|jada|bada|adhiktam)|"
+        r"jyada\s*se\s*jyada|jayda\s*se\s*jayda|jayda|jyada|zyada)\b",
+        re.IGNORECASE,
+    )
+    is_sup = is_superlative or bool(_sup_min_pat.search(text) or _sup_max_pat.search(text))
+    if is_sup and not person_name and not personal:
+        extremum = "least" if _sup_min_pat.search(text) else "most" if _sup_max_pat.search(text) else "most"
+        wants_time = bool(re.search(r"\b(?:logged[\s_-]*time|time|hours?|ghante|ghanta|duration)\b", text, re.IGNORECASE))
+        per_person_entries: dict = {}
+        for item in matched:
+            per_person_entries.setdefault(item["person"], []).append(item)
+
+        candidate_pool = {p: entries for p, entries in per_person_entries.items() if p != "Unidentified contributor"}
+        if not candidate_pool:
+            candidate_pool = per_person_entries
+
+        if not candidate_pool:
+            return _leave_time_empty(None, leave_type, "No leave entries found.")
+
+        leave_label = leave_type or "leave"
+        if wants_time:
+            metrics = {p: sum(e["minutes"] for e in entries) for p, entries in candidate_pool.items()}
+            target_val = min(metrics.values()) if extremum == "least" else max(metrics.values())
+            winners = [p for p, m in metrics.items() if m == target_val]
+            qualifier = "least" if extremum == "least" else "most"
+            if len(winners) == 1:
+                entry_count = len(candidate_pool[winners[0]])
+                entry_word = "entry" if entry_count == 1 else "entries"
+                answer = (
+                    f"{winners[0]} has logged the {qualifier} time in {leave_label} with "
+                    f"{_format_duration(target_val)} across {entry_count} {entry_word}."
+                )
+            else:
+                names_str = ", ".join(winners[:-1]) + f" and {winners[-1]}"
+                answer = (
+                    f"{names_str} are tied with the {qualifier} logged time in {leave_label}: "
+                    f"{_format_duration(target_val)} each."
+                )
+        else:
+            metrics = {p: len(entries) for p, entries in candidate_pool.items()}
+            target_val = min(metrics.values()) if extremum == "least" else max(metrics.values())
+            winners = [p for p, c in metrics.items() if c == target_val]
+            qualifier = "fewest" if extremum == "least" else "most"
+            entry_word = "entry" if target_val == 1 else "entries"
+            if len(winners) == 1:
+                answer = (
+                    f"{winners[0]} takes the {qualifier} {leave_label} with "
+                    f"{target_val} {entry_word} recorded."
+                )
+            else:
+                names_str = ", ".join(winners[:-1]) + f" and {winners[-1]}"
+                answer = (
+                    f"{names_str} are tied with the {qualifier} {leave_label}: "
+                    f"{target_val} {entry_word} each."
+                )
+
+        lines = [answer, ""]
+        for p in winners:
+            person_minutes = sum(e["minutes"] for e in candidate_pool[p])
+            count = len(candidate_pool[p])
+            e_noun = "entry" if count == 1 else "entries"
+            lines.append(f"{p}: {count} {e_noun} ({_format_duration(person_minutes)})")
+        records = [{"document_id": "", "name": leave_label, "text": answer}]
+        conditions = f"superlative={extremum}; leave type={leave_label}"
+        return ExactResult(
+            collection="cards", total=len(matched), records=records, conditions=conditions,
+            complete=True, source="planner", operation="list",
+            notes=[f"Leave-count superlative ({extremum}): {target_val}; {len(winners)} winner(s)."],
+            direct_answer="\n".join(lines).strip(),
+            timings={"db": 0},
+        )
+    # --- End superlative handling ---
+
+>>>>>>> master
     groups = {}
     for item in matched:
         person_group = groups.setdefault(item["person"], {})
@@ -1373,6 +2282,261 @@ def _logged_time_empty(conditions: str, note: str):
     )
 
 
+<<<<<<< HEAD
+=======
+_ASSIGNEE_TERM = re.compile(
+    r"\b(?:assignees?|employee[s]?|person[s]?|peoples?|assigned\s+(?:to|people|persons|users|employees|members|team))\b",
+    re.IGNORECASE)
+
+_ASSIGNEE_NOUN_MAP = {
+    "assignee": "assignee", "assignees": "assignee",
+    "employee": "employee", "employees": "employee",
+    "person": "person", "persons": "person",
+    "people": "people", "peoples": "people",
+}
+_ASSIGNEE_COUNT_REQUEST = re.compile(
+    r"\b(?:how\s+many|count|number\s+of|total)\b", re.IGNORECASE)
+
+
+def is_assignee_count_question(question: str) -> bool:
+    text = question or ""
+    return bool(_ASSIGNEE_TERM.search(text) and _ASSIGNEE_COUNT_REQUEST.search(text))
+
+
+def _assignee_target(question: str):
+    """Extract the task/project name and its type from an assignee-count question."""
+    text = " ".join((question or "").split()).strip(" ?.!")
+    type_hint = ("project" if re.search(r"\b(?:projects?|boards?)\b", text, re.IGNORECASE)
+                 else "task" if re.search(r"\b(?:tasks?|cards?|tickets?|work\s+items?)\b", text, re.IGNORECASE)
+                 else None)
+    patterns = (
+        (r"\b(?:in|on|for|of)\s+(?:the\s+)?(?:project|board)\s+(.+)$", "project"),
+        (r"\b(?:in|on|for|of)\s+(?:the\s+)?(?:task|card|ticket|work\s+item)\s+(.+)$", "task"),
+        (r"\b(?:project|board)\s+(.+?)\s+(?:has|have|contains?|with)\b", "project"),
+        (r"\b(?:task|card|ticket|work\s+item)\s+(.+?)\s+(?:has|have|contains?|with)\b", "task"),
+        (r"\b(?:does|do|did)\s+(.+?)\s+(?:have|contain)\b", None),
+        (r"\bassigned\s+to\s+(.+?)(?=\s+(?:task|card|ticket|work\s+item|project|board)\b|[?.!,]|$)", None),
+        (r"\b(?:in|on|for|of)\s+['\"](.+?)['\"]", None),
+        (r"\b(?:in|on|for|of)\s+(.+)$", None),
+    )
+    for pattern, kind in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if not match:
+            continue
+        name = match.group(1).strip()
+        name = re.sub(r"^(?:the\s+)?(?:project|board|task|card|ticket|work\s+item)\s+", "",
+                      name, flags=re.IGNORECASE)
+        name = re.sub(r"\s+(?:project|board|task|card|ticket|work\s+item)$", "",
+                      name, flags=re.IGNORECASE)
+        name = name.strip(" '\"?.!,")
+        if name and _norm(name) not in {
+                "all", "assignee", "assignees", "people", "peoples", "persons", "users", "employees",
+                "members", "team", "task", "tasks", "project", "projects"}:
+            return name, kind or type_hint
+    return None, type_hint
+
+
+def _assignee_identity(value):
+    if isinstance(value, dict):
+        for key in ("_id", "id", "user", "userId", "user_id", "email",
+                    "name", "displayName", "fullName"):
+            item = value.get(key)
+            if isinstance(item, dict):
+                item = item.get("_id") or item.get("id") or item.get("userId") or item.get("user")
+            if item is not None and not isinstance(item, (dict, list, tuple, set)):
+                return str(item)
+        return None
+    if value is not None and not isinstance(value, (list, tuple, set)):
+        text = str(value).strip()
+        return text or None
+    return None
+
+
+def _assignee_ids(doc: dict) -> set:
+    raw = doc.get("assignees")
+    if isinstance(raw, dict):
+        raw = [raw]
+    elif not isinstance(raw, (list, tuple, set)):
+        raw = [raw] if raw else []
+    return {ref for ref in (_assignee_identity(item) for item in raw) if ref}
+
+
+def _assignee_summary(db, docs: list) -> tuple[int, list]:
+    """Count unique assignees and resolve their display names from 'users'."""
+    people = {}
+    for doc in docs:
+        raw = doc.get("assignees")
+        if isinstance(raw, dict):
+            raw = [raw]
+        elif not isinstance(raw, (list, tuple, set)):
+            raw = [raw] if raw else []
+        for item in raw:
+            ref = _assignee_identity(item)
+            if ref:
+                display = None
+                if isinstance(item, dict):
+                    for key in ("name", "displayName", "fullName", "email"):
+                        value = item.get(key)
+                        if isinstance(value, str) and value.strip():
+                            display = value.strip()
+                            break
+                people.setdefault(ref, display)
+        for entry in (doc.get("loggedTime") or []):
+            if isinstance(entry, dict):
+                uid = _logged_time_entry_user(entry)
+                if uid:
+                    people.setdefault(str(uid), None)
+    resolved = _logged_time_user_names(db, people.keys())
+    names = []
+    for ref, display in people.items():
+        name = display or resolved.get(ref)
+        if not name and not HEX24.match(str(ref)):
+            name = str(ref)
+        if name:
+            names.append(name)
+    return len(people), sorted(set(names), key=str.casefold)
+
+
+def _assignee_card_match(db, name: str):
+    wanted = _norm(name)
+    wanted_tokens = wanted.split()
+    exact, partial = [], []
+    for card in db["cards"].find({"title": {"$exists": True}}, {"title": 1, "assignees": 1, "board": 1, "loggedTime": 1}):
+        title = _clean_label(strip_html(card.get("title")), "")
+        title_norm = _norm(title)
+        if not title_norm:
+            continue
+        if title_norm == wanted:
+            exact.append(card)
+        elif wanted_tokens and all(token in title_norm.split() for token in wanted_tokens):
+            partial.append(card)
+    if exact:
+        return exact[0], [exact[0]]
+    partial.sort(key=lambda card: (len(str(card.get("title") or "")), str(card.get("_id") or "")))
+    return (partial[0], partial) if partial else (None, [])
+
+
+def _assignee_board_match(db, name: str):
+    wanted = _norm(name)
+    wanted_tokens = wanted.split()
+    exact, partial = [], []
+    for board in db["boards"].find({}, {"name": 1, "project": 1, "title": 1}):
+        label = _clean_label(board.get("name") or board.get("project") or board.get("title"), "")
+        label_norm = _norm(label)
+        if not label_norm:
+            continue
+        if label_norm == wanted:
+            exact.append(board)
+        elif wanted_tokens and all(token in label_norm.split() for token in wanted_tokens):
+            partial.append(board)
+    if exact:
+        return exact[0]
+    partial.sort(key=lambda board: (len(str(board.get("name") or board.get("project") or "")),
+                                    str(board.get("_id") or "")))
+    return partial[0] if partial else None
+
+
+def _assignee_count_answer(question: str):
+    if not is_assignee_count_question(question):
+        return None
+    text = question or ""
+    _term_match = _ASSIGNEE_TERM.search(text)
+    _used_term = _term_match.group(0).lower() if _term_match else "assignee"
+    if _used_term.startswith("assigned"):
+        _used_term = "assignee"
+    _noun_single = _ASSIGNEE_NOUN_MAP.get(_used_term, "assignee")
+    _noun_plural = _noun_single + "s" if not _noun_single.endswith("s") else _noun_single
+    target, kind = _assignee_target(question)
+    if not target:
+        return None
+    db = mongo_service.get_db()
+    existing = set(db.list_collection_names())
+    if "cards" not in existing:
+        return None
+
+    card = None
+    board = None
+    if kind == "project":
+        board = _assignee_board_match(db, target) if "boards" in existing else None
+    elif kind == "task":
+        card, matches = _assignee_card_match(db, target)
+    else:
+        card, matches = _assignee_card_match(db, target)
+        if card is None and "boards" in existing:
+            board = _assignee_board_match(db, target)
+
+    if kind == "task" and card is None:
+        return None
+    if kind == "project" and board is None:
+        return None
+    if card is None and board is None:
+        return None
+
+    if card is not None:
+        if len(matches) > 1:
+            parts = []
+            records = []
+            for item in matches:
+                t = _clean_label(strip_html(item.get("title")), "Untitled")
+                c, names = _assignee_summary(db, [item])
+                noun = "person" if c == 1 else "people"
+                parts.append(f"{t}: {c} {noun}" + (f" ({', '.join(names)})" if names else ""))
+                records.append({"document_id": str(item.get("_id", "")), "name": t,
+                                "text": f"Task: {t}; Assignees: {', '.join(names) or c}"})
+            return ExactResult(
+                collection="cards", total=len(matches), records=records, conditions=f"tasks matching '{target}'",
+                complete=True, source="planner", operation="list",
+                direct_answer=f"Multiple tasks match '{target}': " + "; ".join(parts) + ".",
+                notes=[f"Found {len(matches)} matching tasks."],
+            )
+        title = _clean_label(strip_html(card.get("title")), "The task")
+        count, names = _assignee_summary(db, [card])
+        noun = "assignee" if count == 1 else "assignees"
+        answer = f"{title} has {count} {noun}."
+        if names:
+            answer = f"{title} has {count} {noun}." + f" ({', '.join(names)})"
+        return ExactResult(
+            collection="cards", total=1,
+            records=[{"document_id": str(card.get("_id", "")), "name": title,
+                      "text": f"Task: {title}; Assignees: {', '.join(names) or count}"}],
+            conditions=f"assignees in task '{title}'", complete=True, source="planner", operation="count",
+            direct_answer=answer,
+            notes=[f"Counted the 'assignees' array on card '{title}'."],
+        )
+
+    board_id = board.get("_id")
+    board_ids = _id_variants([board_id])
+    cards = list(db["cards"].find({"board": {"$in": board_ids}}, {"assignees": 1})) if board_id is not None else []
+    name = _clean_label(board.get("name") or board.get("project") or board.get("title"), "The project")
+    count, names = _assignee_summary(db, cards)
+    noun = _noun_single if count == 1 else _noun_plural
+    card_noun = "card" if len(cards) == 1 else "cards"
+    answer = f"Project {name} has {count} unique {noun} across {len(cards)} {card_noun}."
+    if names:
+        answer = (f"Project {name} has {count} unique {noun} across {len(cards)} {card_noun}."
+                  f" ({', '.join(names)})")
+    return ExactResult(
+        collection="cards", total=len(cards),
+        records=[{"document_id": str(board_id or ""), "name": name,
+                  "text": f"Project: {name}; Unique assignees: {', '.join(names) or count}; "
+                          f"Cards: {len(cards)}"}],
+        conditions=f"unique assignees in project '{name}'", complete=True, source="planner", operation="count",
+        direct_answer=answer,
+        notes=[f"Counted unique users in the 'assignees' arrays of {len(cards)} cards on board '{name}'."],
+    )
+
+
+def _mentions_self(text: str, user_id: str) -> bool:
+    """True when a logged-time question refers to the signed-in account itself."""
+    if not user_id:
+        return False
+    db = mongo_service.get_db()
+    names = _logged_time_user_names(db, _id_variants([user_id]))
+    current_user_name = next(iter(names.values()), None) if names else None
+    return bool(user_id and authorization_service.mentions_current_user(text, user_id, current_user_name))
+
+
+>>>>>>> master
 def _personal_logged_time_question(question: str) -> bool:
     return bool(re.search(r"\b(?:my|mine|myself)\b", question or "", re.IGNORECASE))
 
@@ -1396,9 +2560,27 @@ def _logged_time_answer(question: str, history: list = None, current_user_id: st
     if not is_logged_time_question(text) and not followup:
         return None
 
+<<<<<<< HEAD
     personal = bool(current_user_id and _personal_logged_time_question(text))
     scope_text = text
     requested_person = None if personal else _logged_time_person_candidate(scope_text)
+=======
+    candidate_person = _logged_time_person_candidate(text)
+    if not candidate_person and not re.search(r"^(?:who|which\s+(?:employee|user|member|person|contributor|staff))\b", text, re.IGNORECASE):
+        candidate_person = _employee_name_from_question(text)
+    target_date = _extract_date_from_question(text)
+    target_date_str = None
+    if target_date:
+        t_y, t_m, t_d = target_date
+        target_date_str = f"{t_y}-{t_m:02d}-{t_d:02d}" if t_y else f"{t_m:02d}-{t_d:02d}"
+    personal = bool(
+        current_user_id and
+        not candidate_person and
+        (_personal_logged_time_question(text) or _mentions_self(text, current_user_id))
+    )
+    scope_text = text
+    requested_person = None if personal else candidate_person
+>>>>>>> master
     if (not personal and not requested_person and not _logged_time_project_candidate(text)
             and re.search(r"\b(?:calculate|compute|sum|total)\b", text, re.IGNORECASE)):
         for turn in reversed(history or []):
@@ -1448,9 +2630,18 @@ def _logged_time_answer(question: str, history: list = None, current_user_id: st
             person_name = next(iter(_logged_time_user_names(db, person_ids).values()), "you")
 
     requested_project = _logged_time_project_candidate(scope_text, person_name)
+<<<<<<< HEAD
     if requested_person and not person_ids and not requested_project:
         return _logged_time_empty(f"'{requested_person}' (logged time)",
                                   f"No user matched the name '{requested_person}'.")
+=======
+    if requested_person and not person_ids:
+        if requested_project and _norm(requested_person) == _norm(requested_project):
+            requested_person = None
+        else:
+            return _logged_time_empty(f"'{requested_person}' (logged time)",
+                                      f"No user matched the name '{requested_person}'.")
+>>>>>>> master
 
     existing = set(db.list_collection_names())
     boards = {}
@@ -1480,7 +2671,12 @@ def _logged_time_answer(question: str, history: list = None, current_user_id: st
     projection = {"title": 1, "board": 1, "status": 1, "loggedTime": 1}
     cards = list(db["cards"].find(flt, projection).sort("_id", 1)) if "cards" in existing else []
 
+<<<<<<< HEAD
     project_tokens = re.findall(r"[a-z0-9]+", (requested_project or "").lower())
+=======
+    project_tokens = [t for t in re.findall(r"[a-z0-9]+", (requested_project or "").lower())
+                      if t not in {"task", "tasks", "card", "cards", "project", "projects", "board", "boards"}]
+>>>>>>> master
     matched = []
     cards_used = 0
     for card in cards:
@@ -1489,7 +2685,14 @@ def _logged_time_answer(question: str, history: list = None, current_user_id: st
         project = boards.get(str(board_id), "Unknown project") if board_id is not None else "Unknown project"
         if project_tokens:
             haystack = f"{project} {title}".lower()
+<<<<<<< HEAD
             if not all(token in haystack for token in project_tokens):
+=======
+            if not all(
+                token in haystack or (len(token) > 3 and token.endswith("s") and token[:-1] in haystack)
+                for token in project_tokens
+            ):
+>>>>>>> master
                 continue
         entries = card.get("loggedTime") or []
         if isinstance(entries, dict):
@@ -1501,6 +2704,29 @@ def _logged_time_answer(question: str, history: list = None, current_user_id: st
             user_id = _logged_time_entry_user(entry)
             if person_ids and user_id not in {str(value) for value in person_ids}:
                 continue
+<<<<<<< HEAD
+=======
+            if target_date:
+                t_year, t_month, t_day = target_date
+                d_val = entry.get("date") or entry.get("createdAt")
+                if not d_val:
+                    continue
+                e_year, e_month, e_day = None, None, None
+                if hasattr(d_val, "year") and hasattr(d_val, "month") and hasattr(d_val, "day"):
+                    e_year, e_month, e_day = d_val.year, d_val.month, d_val.day
+                elif isinstance(d_val, str):
+                    m_d = re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", d_val)
+                    if m_d:
+                        e_year, e_month, e_day = int(m_d.group(1)), int(m_d.group(2)), int(m_d.group(3))
+                    else:
+                        m_d2 = re.search(r"(\d{1,2})[-/](\d{1,2})", d_val)
+                        if m_d2:
+                            e_month, e_day = int(m_d2.group(1)), int(m_d2.group(2))
+                if e_month != t_month or e_day != t_day:
+                    continue
+                if t_year is not None and e_year is not None and e_year != t_year:
+                    continue
+>>>>>>> master
             card_entries.append((entry, user_id))
         if not card_entries:
             continue
@@ -1537,19 +2763,79 @@ def _logged_time_answer(question: str, history: list = None, current_user_id: st
             })
 
     if not matched:
+<<<<<<< HEAD
         scope = (f"'{person_name}'" if person_name else f"project '{requested_project}'"
                  if requested_project else "the cards collection")
         conditions = ("loggedTime.user = " + str(person_name) if person_name else
                       f"project = {requested_project}" if requested_project else "all loggedTime entries")
+=======
+        date_suffix = f" on {target_date_str}" if target_date else ""
+        scope = (f"'{person_name}'" if person_name else f"project '{requested_project}'"
+                 if requested_project else "the cards collection")
+        conditions = ("loggedTime.user = " + str(person_name) if person_name else
+                      f"project = {requested_project}" if requested_project else "all loggedTime entries") + date_suffix
+>>>>>>> master
         return _logged_time_empty(scope, f"No nested loggedTime entries matched in 'cards' ({conditions}).")
 
     user_names = _logged_time_user_names(db, {item["person_id"] for item in matched if item["person_id"]})
     for item in matched:
         item["person"] = user_names.get(item["person_id"], person_name or "Unidentified contributor")
 
+<<<<<<< HEAD
     matched.sort(key=lambda item: (str(item["person"]).casefold(), str(item["project"]).casefold(),
                                    str(item["title"]).casefold(), str(item["date"] or ""), item["document_id"]))
     total_minutes = sum(item["minutes"] for item in matched)
+=======
+    # Check for superlative / extremum queries: least vs most
+    min_pat = re.compile(
+        r"\b(?:least|lowest|minimum|min|smallest|shortest|less|fewer|fewest|"
+        r"sabse\s*(?:thoda|kam|chhota|chota|nyuntam)|"
+        r"sase\s*(?:thoda|kam|chhota|chota|nyuntam)|"
+        r"kam\s*se\s*kam|thoda|kam)\b",
+        re.IGNORECASE,
+    )
+    max_pat = re.compile(
+        r"\b(?:most|highest|maximum|max|largest|biggest|longest|more|"
+        r"sabse\s*(?:jayda|jyada|zyada|jada|bada|adhiktam)|"
+        r"sase\s*(?:jayda|jyada|zyada|jada|bada|adhiktam)|"
+        r"jyada\s*se\s*jyada|jayda\s*se\s*jayda|jayda|jyada|zyada)\b",
+        re.IGNORECASE,
+    )
+    extremum = "least" if min_pat.search(scope_text) else "most" if max_pat.search(scope_text) else None
+
+    if extremum and not person_name and not personal:
+        # Team-level superlative (question like "who has the least logged time in the frontend team?"):
+        # rank every contributor in the scoped project(s) by their total logged time and
+        # answer about the top performer instead of dumping all entries plus the grand total.
+        per_person = {}
+        for item in matched:
+            person = item["person"] or "Unidentified contributor"
+            bucket = per_person.setdefault(person, {"minutes": 0, "entries": 0})
+            bucket["minutes"] += item["minutes"]
+            bucket["entries"] += 1
+        if per_person:
+            target_person = (
+                min(per_person.items(), key=lambda pair: pair[1]["minutes"])[0]
+                if extremum == "least"
+                else max(per_person.items(), key=lambda pair: pair[1]["minutes"])[0]
+            )
+            attributed = [item for item in matched if (item["person"] or "Unidentified contributor") == target_person]
+            if attributed:
+                person_name = target_person
+                matched = attributed
+
+    if extremum == "least":
+        target_val = min(item["minutes"] for item in matched)
+        matched = [item for item in matched if item["minutes"] == target_val]
+    elif extremum == "most":
+        target_val = max(item["minutes"] for item in matched)
+        matched = [item for item in matched if item["minutes"] == target_val]
+
+    matched.sort(key=lambda item: (str(item["person"]).casefold(), str(item["project"]).casefold(),
+                                   str(item["title"]).casefold(), str(item["date"] or ""), item["document_id"]))
+    total_minutes = sum(item["minutes"] for item in matched)
+    cards_used = len({item["document_id"] for item in matched})
+>>>>>>> master
 
     groups = {}
     for item in matched:
@@ -1557,6 +2843,7 @@ def _logged_time_answer(question: str, history: list = None, current_user_id: st
         project_group = person_group.setdefault(item["project"], {})
         project_group.setdefault((item["title"], item["status"], item["document_id"]), []).append(item)
 
+<<<<<<< HEAD
     if person_name:
         heading = f"All logged-time entries for {person_name}:"
     elif requested_project:
@@ -1566,6 +2853,38 @@ def _logged_time_answer(question: str, history: list = None, current_user_id: st
     lines = [heading,
              f"Total: {_format_duration(total_minutes)} across {len(matched)} entries on {cards_used} tasks.",
              ""]
+=======
+    qualifier = "Least logged-time" if extremum == "least" else "Highest logged-time" if extremum == "most" else "All logged-time"
+    entry_noun = "entry" if len(matched) == 1 else "entries"
+    matched_as_task = (
+        bool(requested_project) and
+        any(_norm(requested_project) in _norm(item.get("title", "")) for item in matched)
+    )
+    scope_kind = "task" if (
+        matched_as_task and
+        not any(_norm(requested_project) in _norm(item.get("project", "")) for item in matched)
+    ) else "project"
+    date_suffix = f" on {target_date_str}" if target_date else ""
+    if person_name and requested_project:
+        heading = f"{qualifier} {entry_noun} for {person_name} in {scope_kind} {requested_project}{date_suffix}:"
+    elif person_name:
+        heading = f"{qualifier} {entry_noun} for {person_name}{date_suffix}:"
+    elif requested_project:
+        heading = f"{qualifier} {entry_noun} for {scope_kind} {requested_project}{date_suffix}:"
+    else:
+        heading = f"{qualifier} {entry_noun}{date_suffix}:"
+
+    task_noun = "task" if cards_used == 1 else "tasks"
+    if extremum:
+        lines = [heading,
+                 f"Duration: {_format_duration(total_minutes)} ({_format_duration(matched[0]['minutes'])} each) across {len(matched)} {entry_noun} on {cards_used} {task_noun}." if len(matched) > 1 else
+                 f"Duration: {_format_duration(total_minutes)} across 1 entry on {cards_used} {task_noun}.",
+                 ""]
+    else:
+        lines = [heading,
+                 f"Total: {_format_duration(total_minutes)} across {len(matched)} entries on {cards_used} {task_noun}.",
+                 ""]
+>>>>>>> master
     for person, person_projects in groups.items():
         person_minutes = sum(item["minutes"] for project in person_projects.values()
                              for entries in project.values() for item in entries)
@@ -1634,8 +2953,17 @@ def _leave_types_answer(question: str):
 
     found = set()
     if "cards" in existing:
+<<<<<<< HEAD
         try:
             for doc in db["cards"].find({"title": {"$exists": True}}, {"title": 1}):
+=======
+        leave_board_ids = _leave_board_ids(db)
+        query = {"title": {"$exists": True}}
+        if leave_board_ids:
+            query["board"] = {"$in": _id_variants(list(leave_board_ids))}
+        try:
+            for doc in db["cards"].find(query, {"title": 1}):
+>>>>>>> master
                 title = str(doc.get("title", "")).strip()
                 for leave_type in known_types:
                     if leave_type.casefold() in title.casefold():
@@ -2029,7 +3357,11 @@ def _project_team_details(result: ExactResult):
                            f"; Linked people: {len(names)} unique ({team_text}); "
                            f"cards: {len(cards)} total, {open_cards} not marked complete; "
                            f"subtasks: {len(subtasks)} total, {open_subtasks} not marked complete. "
+<<<<<<< HEAD
                            "People are counted from board members, card assignees, and logged-time contributors.")
+=======
+                           "People are counted from board members, card assignees, and other linked work.")
+>>>>>>> master
 
 
 def try_structured(question: str, history: list = None, current_user_id: str = None, is_admin: bool = False):
@@ -2059,6 +3391,19 @@ def try_structured(question: str, history: list = None, current_user_id: str = N
 
     try:
         began = time.perf_counter()
+<<<<<<< HEAD
+=======
+        user_attr = _user_attribute_answer(question, history=history)
+        if user_attr is not None:
+            user_attr.timings = {"plan": round((time.perf_counter() - began) * 1000), **user_attr.timings}
+            return user_attr
+        assignee_count = _assignee_count_answer(question)
+        if assignee_count is not None:
+            assignee_count.context = _context(assignee_count)
+            assignee_count.timings = {"plan": round((time.perf_counter() - began) * 1000),
+                                      **assignee_count.timings}
+            return assignee_count
+>>>>>>> master
         person = _person_lookup(question)
         if person is not None:
             person.timings = {"plan": round((time.perf_counter() - began) * 1000), **person.timings}
@@ -2070,7 +3415,11 @@ def try_structured(question: str, history: list = None, current_user_id: str = N
         catalog = build_catalog()
         if not catalog:
             return None
+<<<<<<< HEAD
         history_key = tuple((turn["question"], turn["answer"]) for turn in (history or [])[-5:])
+=======
+        history_key = tuple((turn["question"], turn["answer"]) for turn in (history or [])[-12:])
+>>>>>>> master
         key = (" ".join(question.lower().split()), history_key)
         cached = _plans.get(key)
         plan, source, planner_ok = None, "planner", True
@@ -2100,7 +3449,11 @@ def try_structured(question: str, history: list = None, current_user_id: str = N
         )
         if wants_project_team and plan.get("collection") == "boards":
             plan = {**plan, "operation": "list"}
+<<<<<<< HEAD
         result = execute(plan, catalog, source)
+=======
+        result = execute(plan, catalog, source, include_logged_time=wants_logged_time(question))
+>>>>>>> master
         if result is None:
             return None
         if wants_project_team and plan.get("collection") == "boards":

@@ -195,6 +195,7 @@ ASK  (POST /api/ask/)
 
 ## 2. Quick start
 
+<<<<<<< HEAD
 ### Windows (PowerShell)
 ```powershell
 py -3.12 -m venv venv
@@ -214,6 +215,20 @@ source venv/bin/activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt                       # dev/tests: pip install -r requirements-dev.txt
 cp .env.example .env                                    # edit .env with your MongoDB URI & API keys
+=======
+deactivate
+Remove-Item -Recurse -Force .\venv
+py -3.12 -m venv venv
+.\venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+
+```bash
+py -3.12 -m venv venv && .\venv\Scripts\Activate.ps1        # Mac/Linux: source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt                       # dev/tests: pip install -r requirements-dev.txt
+copy .env.example .env                                  # then edit .env (MONGO_URI, MONGO_DATABASE, LLM_API_KEY)
+>>>>>>> master
 python manage.py seed_sample_data                       # optional: cross-referenced example data
 python manage.py ingest                                 # build embeddings + index
 python manage.py runserver                              # http://127.0.0.1:8000
@@ -407,6 +422,7 @@ This is still bounded: for complete lists or exact counts over big data, a struc
 - Employee list/count requests use scoped semantic retrieval rather than unrestricted structured MongoDB queries. These results may not be complete or exact.
 - After deploying access controls, rebuild the index with `python manage.py ingest --full` so relationship metadata is current. `/api/ingest/` requires `INGEST_TOKEN` outside DEBUG.
 
+<<<<<<< HEAD
 ## 11. Key Components & Architecture
 
 | Component / File | Purpose |
@@ -423,3 +439,18 @@ This is still bounded: for complete lists or exact counts over big data, a struc
 | `rag/tests.py` | Test suite covering conversion, search, multi-hop, caching, and auth |
 | `templates/rag/index.html` | Chatbot web user interface template |
 | `static/rag/` | Frontend styles and interactive client scripts |
+=======
+llm_service.py: Builds LLM prompts and plans structured database queries; updated to pass recent chat turns to the planner and avoid guessing when facts are missing.
+
+structured_query.py: Runs exact list/count queries; updated to use chat history when interpreting follow-ups.
+
+rag_service.py: Coordinates each chat request, history, search, and answers; updated to resolve “first one” from the previous list and keep generated answers out of search terms.
+
+tests.py: Automated tests for the chat and query behavior changes.
+
+app.js: Creates the chat loading indicator; removed the equalizer bars.
+
+app.css: Styles chat and scrolling; hides the chatbot’s scrollbars while keeping scrolling enabled.
+
+index.html: Main page template; loads the CSS and JavaScript with versioned URLs so browsers fetch the updates.
+>>>>>>> master

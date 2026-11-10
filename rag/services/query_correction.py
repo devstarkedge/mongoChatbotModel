@@ -4,7 +4,11 @@ import re
 import threading
 from collections import Counter, defaultdict
 
+<<<<<<< HEAD
 from . import embedding_store
+=======
+from . import embedding_store, mongo_service
+>>>>>>> master
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +21,38 @@ _MASKED = re.compile(r"(?<!\w)([A-Za-z0-9][A-Za-z0-9*#?•]{2,})(?!\w)")
 _MASK_CHARS = re.compile(r"[*#?•]+")
 _MORPH_SUFFIXES = ("", "s", "es", "ed", "ing", "er", "ers", "ment", "ments", "tion", "tions")
 
+<<<<<<< HEAD
+=======
+_PROTECTED_WORDS = {
+    # Superlatives, comparatives, extremums
+    "least", "most", "lowest", "highest", "minimum", "maximum", "min", "max",
+    "smallest", "largest", "shortest", "longest", "best", "worst", "more", "less",
+    "fewer", "fewest", "earliest", "latest", "first", "last", "top", "bottom",
+    # Time and logging domain words
+    "logged", "logging", "time", "times", "timesheet", "timesheets", "timelog", "timelogs",
+    "hour", "hours", "minute", "minutes", "second", "seconds", "entry", "entries",
+    "record", "records", "spent", "worked", "working", "work", "duration", "total",
+    "tracking", "tracked", "billable",
+    # Hindi / Hinglish keywords and particles
+    "sabse", "sase", "thoda", "thodi", "thode", "kam", "jyada", "jayda", "zyada", "jada",
+    "bada", "badi", "bade", "chhota", "chota", "chhoti", "choti", "chote", "chhote",
+    "adhiktam", "nyuntam", "kiska", "kiski", "kiske", "kisne", "kaun", "kitna", "kitne",
+    "kitni", "ghante", "ghanta", "karo", "batao", "dikhao",
+    # Entities and common question terms
+    "user", "users", "member", "members", "employee", "employees", "person", "people",
+    "contributor", "contributors", "author", "authors", "assignee", "assignees",
+    "client", "clients", "team", "teams", "project", "projects", "board", "boards",
+    "card", "cards", "task", "tasks", "subtask", "subtasks", "list", "lists",
+    "what", "which", "who", "whom", "whose", "when", "where", "why", "how",
+    # Workspace & task domain words
+    "test", "tests", "testing", "tested", "article", "articles", "submission", "submissions",
+    "submit", "submitted", "dev", "developer", "developers", "development",
+    "bug", "bugs", "fix", "fixes", "feature", "features", "release", "releases",
+    "review", "reviews", "reviewed", "code", "coding", "design", "designs",
+    "doc", "docs", "document", "documents", "documentation", "new", "old",
+}
+
+>>>>>>> master
 
 def _distance_within(left: str, right: str, limit: int) -> int | None:
     """Return edit distance up to limit, treating a neighboring transposition as one edit."""
@@ -44,6 +80,11 @@ def _load_vocabulary():
     with _lock:
         if _vocabulary is None:
             counts = Counter()
+<<<<<<< HEAD
+=======
+            for term in _PROTECTED_WORDS:
+                counts[term] = 50
+>>>>>>> master
             try:
                 cursor = embedding_store.collection().find({}, {"text": 1})
                 for doc in cursor:
@@ -51,6 +92,39 @@ def _load_vocabulary():
                                   if len(token) >= 3)
             except Exception:
                 logger.exception("Could not build the query spelling vocabulary")
+<<<<<<< HEAD
+=======
+
+            # Dynamically index and protect domain entity names (users, boards, departments)
+            try:
+                db = mongo_service.get_db()
+                existing = set(db.list_collection_names())
+                if "users" in existing:
+                    for u in db["users"].find({}, {"name": 1, "firstName": 1, "lastName": 1, "username": 1}):
+                        for f in ("name", "firstName", "lastName", "username"):
+                            val = u.get(f)
+                            if val and isinstance(val, str):
+                                for tok in re.findall(r"[A-Za-z0-9]+", val):
+                                    if len(tok) >= 3 and not tok.isdigit():
+                                        counts[tok.lower()] = max(counts[tok.lower()], 100)
+                if "boards" in existing:
+                    for b in db["boards"].find({}, {"name": 1, "project": 1}):
+                        for f in ("name", "project"):
+                            val = b.get(f)
+                            if val and isinstance(val, str):
+                                for tok in re.findall(r"[A-Za-z0-9]+", val):
+                                    if len(tok) >= 3 and not tok.isdigit():
+                                        counts[tok.lower()] = max(counts[tok.lower()], 100)
+                if "departments" in existing:
+                    for d in db["departments"].find({}, {"name": 1}):
+                        val = d.get("name")
+                        if val and isinstance(val, str):
+                            for tok in re.findall(r"[A-Za-z0-9]+", val):
+                                if len(tok) >= 3 and not tok.isdigit():
+                                    counts[tok.lower()] = max(counts[tok.lower()], 100)
+            except Exception:
+                logger.debug("Could not index dynamic entity names for spelling vocabulary", exc_info=True)
+>>>>>>> master
             by_length = defaultdict(list)
             by_prefix = defaultdict(list)
             for word in counts:
@@ -132,6 +206,13 @@ _NORMALIZATIONS = (
     (r"\bseo\b", "SEO"),
     (r"\bhr\b", "HR"),
     (r"\bit\b", "IT"),
+<<<<<<< HEAD
+=======
+    (r"\b(time|hours?|logged|work|project|task|board)of\b", r"\1 of"),
+    (r"\b(time|hours?|logged|work|project|task|board)in\b", r"\1 in"),
+    (r"\b(time|hours?|logged|work|project|task|board)for\b", r"\1 for"),
+    (r"\b(time|hours?|logged|work|project|task|board)by\b", r"\1 by"),
+>>>>>>> master
 )
 
 _NORMALIZED = [(re.compile(p, re.IGNORECASE), r) for p, r in _NORMALIZATIONS]
@@ -166,7 +247,11 @@ def correct_query(query: str) -> str:
     def repair_spelling(match):
         original = match.group(0)
         word = original.lower()
+<<<<<<< HEAD
         if len(word) < 4 or word in vocabulary:
+=======
+        if len(word) < 4 or word in vocabulary or word in _PROTECTED_WORDS:
+>>>>>>> master
             return original
         corrected = _best_spelling(word, vocabulary, by_length, by_prefix)
         if not corrected:

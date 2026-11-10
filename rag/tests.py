@@ -412,6 +412,33 @@ class SearchTests(MongoCase):
         ):
             rag_service.ask("Who is Rohan Mehta?", user_id=aisha_id)
 
+<<<<<<< HEAD
+=======
+    def test_mixed_self_and_another_user_query_is_allowed_but_scoped(self):
+        aisha_id = str(self.db["users"].find_one({"email": "aisha@example.com"})["_id"])
+        scope = self.real_resolve_scope(aisha_id)
+        with patch.object(llm_service, "generate", return_value="scoped answer") as generate:
+            result = rag_service.ask("Aisha Khan and Rohan Mehta tasks", user_id=aisha_id)
+
+        self.assertEqual(result["answer"], "scoped answer")
+        self.assertTrue(all(
+            any(doc_id.startswith(f"{source['collection']}:{source['document_id']}:")
+                for doc_id in scope.embedding_ids)
+            for source in result["sources"]
+        ))
+        context = generate.call_args[0][1]
+        self.assertNotIn("Fix login bug", context)
+
+        personal = rag_service.ask("my tasks and Rohan Mehta's tasks", user_id=aisha_id)
+        self.assertIn("Design landing page", personal["answer"])
+        self.assertNotIn("Fix login bug", personal["answer"])
+
+        self.assertTrue(authorization_service.mentions_current_user(
+            "my tasks and Rohan Mehta's tasks", aisha_id, "Aisha Khan"))
+        self.assertFalse(authorization_service.mentions_current_user(
+            "Who is Rohan Mehta?", aisha_id, "Aisha Khan"))
+
+>>>>>>> master
     def test_admin_search_can_access_all_records(self):
         self.ingest()
         result = rag_service.search("Fix login bug", user_id=self.admin_id, hybrid=False)
@@ -599,7 +626,12 @@ class AskTests(MongoCase):
             rag_service.chat_memory.add(session_id, f"question {index}", f"answer {index}", owner_id=owner_id)
 
         result = rag_service.ask(
+<<<<<<< HEAD
             "hello", session_id=session_id, edit_index=11, user_id=self.admin_id)
+=======
+            "hello", session_id=session_id,
+            edit_index=rag_service.chat_memory.MAX_TURNS + 1, user_id=self.admin_id)
+>>>>>>> master
 
         state = rag_service.chat_memory.get_state(session_id, owner_id=owner_id)
         self.assertEqual(result["mode"], "conversational")
@@ -607,6 +639,24 @@ class AskTests(MongoCase):
         self.assertEqual(len(state["turns"]), rag_service.chat_memory.MAX_TURNS)
         self.assertEqual(state["turns"][-1]["question"], "hello")
 
+<<<<<<< HEAD
+=======
+    def test_chat_memory_retains_twenty_previous_turns(self):
+        session_id = "ca11c014ab"
+        owner_id = f"{self.admin_id}:admin"
+        self.addCleanup(rag_service.chat_memory.clear, session_id, owner_id=owner_id)
+        for index in range(rag_service.chat_memory.MAX_TURNS + 3):
+            rag_service.chat_memory.add(
+                session_id, f"question {index}", f"answer {index}", owner_id=owner_id)
+
+        state = rag_service.chat_memory.get_state(session_id, owner_id=owner_id)
+        self.assertEqual(rag_service.chat_memory.MAX_TURNS, 20)
+        self.assertEqual(len(state["turns"]), 20)
+        self.assertEqual(state["offset"], 3)
+        self.assertEqual(state["turns"][0]["question"], "question 3")
+        self.assertEqual(state["turns"][-1]["question"], "question 22")
+
+>>>>>>> master
     def test_editing_turn_outside_retained_history_has_clear_error(self):
         session_id = "ca11c013ab"
         owner_id = f"{self.admin_id}:admin"
@@ -614,7 +664,11 @@ class AskTests(MongoCase):
         for index in range(rag_service.chat_memory.MAX_TURNS + 2):
             rag_service.chat_memory.add(session_id, f"question {index}", f"answer {index}", owner_id=owner_id)
 
+<<<<<<< HEAD
         with self.assertRaisesRegex(InvalidRequestError, "outside the 10-turn edit history"):
+=======
+        with self.assertRaisesRegex(InvalidRequestError, r"outside the \d+-turn edit history"):
+>>>>>>> master
             rag_service.ask("hello", session_id=session_id, edit_index=1, user_id=self.admin_id)
 
     def test_admin_cannot_reopen_legacy_global_chat_history(self):
@@ -971,7 +1025,12 @@ class ApiTests(MongoCase):
         self.assertEqual(len(existing_history["turns"]), rag_service.chat_memory.MAX_TURNS)
 
         response = self.post("/api/ask/", {
+<<<<<<< HEAD
             "question": "hello", "session_id": session_id, "edit_index": 11,
+=======
+            "question": "hello", "session_id": session_id,
+            "edit_index": rag_service.chat_memory.MAX_TURNS + 1,
+>>>>>>> master
         })
 
         self.assertEqual(response.status_code, 200, response.content)
@@ -1115,6 +1174,170 @@ class StructuredQueryTests(MongoCase):
             result = structured_query.try_structured("department wise?", history=history)
         self.assertIsNone(result)
 
+<<<<<<< HEAD
+=======
+    def test_elliptical_followup_reuses_the_person_from_an_earlier_turn(self):
+        self.db["boards"].insert_many([
+            {"_id": p["_id"], "name": p["project"], "status": p["status"]}
+            for p in SAMPLE["projects"]
+        ])
+        self.db["cards"].insert_many([
+            {"title": t["title"], "board": t["projectId"], "assignees": [t["assignedTo"]],
+             "status": t["status"]}
+            for t in SAMPLE["tasks"]
+        ])
+        history = [{"question": "list of all projects of Aisha Khan",
+                    "answer": "Health4Travel and BlogRevamp."}]
+        result = structured_query.try_structured("give me all", history=history)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.collection, "boards")
+        self.assertEqual(result.total, 2)
+        self.assertIn("Aisha Khan", result.conditions)
+
+    def test_task_and_project_details_hide_logged_time_unless_asked(self):
+        aisha = self.db["users"].find_one({"email": "aisha@example.com"})
+        board_id = ObjectId()
+        self.db["boards"].insert_one({"_id": board_id, "name": "ShopEase"})
+        self.db["cards"].insert_one({
+            "title": "Fix login bug", "board": board_id, "assignees": [aisha["_id"]],
+            "status": "todo",
+            "loggedTime": [{"user": aisha["_id"], "hours": 2, "minutes": 5,
+                            "date": "2026-01-02", "description": "TRACKED-DETAIL"}],
+        })
+        structured_query.reset_for_tests()
+
+        plain = structured_query._employee_work_status(
+            "show tasks of Aisha Khan", current_user_id=self.admin_id)
+        self.assertIsNotNone(plain)
+        self.assertIn("Fix login bug", plain.records[0]["text"])
+        self.assertNotIn("Logged Time", plain.records[0]["text"])
+        self.assertNotIn("TRACKED-DETAIL", plain.records[0]["text"])
+
+        catalog = structured_query.build_catalog(force=True)
+        plan = {"collection": "cards", "operation": "list",
+                "filters": [{"field": "title", "op": "eq", "value": "Fix login bug"}]}
+        hidden = structured_query.execute(plan, catalog, "planner")
+        self.assertIn("Fix login bug", hidden.records[0]["text"])
+        self.assertNotIn("Logged Time", hidden.records[0]["text"])
+        shown = structured_query.execute(plan, catalog, "planner", include_logged_time=True)
+        self.assertIn("Logged Time", shown.records[0]["text"])
+
+    def test_assignee_counts_come_from_the_cards_assignees_array(self):
+        aisha = self.db["users"].find_one({"email": "aisha@example.com"})
+        rohan = self.db["users"].find_one({"email": "rohan@example.com"})
+        meera = self.db["users"].find_one({"email": "meera@example.com"})
+        board_id = ObjectId()
+        self.db["boards"].insert_one({"_id": board_id, "name": "ShopEase"})
+        self.db["cards"].insert_many([
+            {"title": "Design landing page", "board": board_id,
+             "assignees": [aisha["_id"], rohan["_id"]]},
+            {"title": "Fix login bug", "board": board_id,
+             "assignees": [rohan["_id"], meera["_id"]]},
+            {"title": "Write release notes", "board": board_id, "assignees": []},
+        ])
+
+        task = structured_query.try_structured("how many assignees does Design landing page have?")
+        self.assertIn("Design landing page has 2 assignees.", task.direct_answer)
+
+        assigned = structured_query.try_structured("how many people are assigned to Fix login bug?")
+        self.assertIn("Fix login bug has 2 assignees.", assigned.direct_answer)
+
+        project = structured_query.try_structured("how many assignees in ShopEase project?")
+        self.assertIn("Project ShopEase has 3 unique assignees across 3 cards.", project.direct_answer)
+
+        empty = structured_query.try_structured("how many assignees in task Write release notes?")
+        self.assertIn("Write release notes has 0 assignees.", empty.direct_answer)
+
+    def test_board_output_deduplicates_records_and_drops_blank_bullets(self):
+        exact = structured_query.ExactResult(
+            collection="cards", total=3,
+            records=[
+                {"document_id": "1", "name": "TASK",
+                 "text": "Title: TASK; Status: Done; Project: Alpha; Description: Keep me"},
+                {"document_id": "2", "name": "TASK",
+                 "text": "Title: TASK; Status: Done; Project: Alpha; Description: Duplicate with more detail"},
+                {"document_id": "3", "name": "Other",
+                 "text": "Title: Other; Status: Done; Project: Alpha; Description: ...,"},
+            ],
+            conditions="user = Shubham", complete=True, source="planner",
+        )
+        answer = rag_service._format_board_answer(exact)
+        self.assertIn("2 Cards Records", answer)
+        self.assertEqual(answer.count("**🟢 TASK"), 1)
+        self.assertIn("Duplicate with more detail", answer)
+        self.assertNotIn("Keep me", answer)
+        self.assertNotIn("• ,", answer)
+        self.assertNotIn("• ...", answer)
+        self.assertNotIn("• TASK", answer)
+
+        result = rag_service._exact_answer("shubham's all completed tasks", exact)
+        self.assertEqual(len(result["sources"]), 2)
+        self.assertEqual(result["records_used"], 2)
+
+    def test_blank_bullet_lines_are_stripped_from_answers(self):
+        raw = "Header\n• \n• , , , , , , \n• \n• Keep this\n•\n\n\nFooter"
+        self.assertEqual(rag_service._strip_blank_bullet_lines(raw), "Header\n• Keep this\n\nFooter")
+
+        exact = structured_query.ExactResult(
+            collection="cards", total=1,
+            records=[{"document_id": "1", "name": "Development",
+                      "text": "Title: Development; Status: In Progress"}],
+            conditions="user = Shubham", complete=True, source="planner",
+            direct_answer=raw,
+        )
+        result = rag_service._exact_answer("shubham's all tasks", exact)
+        self.assertNotIn("\n• \n", result["answer"])
+        self.assertNotIn("• , , ,", result["answer"])
+        self.assertIn("• Keep this", result["answer"])
+
+    def test_html_tags_are_sent_as_plain_text_only(self):
+        exact = structured_query.ExactResult(
+            collection="cards", total=1,
+            records=[{"document_id": "1", "name": "Task",
+                      "text": "Title: Task; Status: Done"}],
+            conditions="html", complete=True, source="planner",
+            direct_answer=('<p>Hello <strong>team</strong><br>'
+                           'Read <a href="https://example.com">this</a>.</p>'
+                           '<p>Bye</p>'),
+        )
+        answer = rag_service._exact_answer("show it as html", exact)["answer"]
+        for tag in ("<p>", "</p>", "<strong>", "</strong>", "<br>", "<a "):
+            self.assertNotIn(tag, answer)
+        self.assertIn("Hello team", answer)
+        self.assertIn("Read this.", answer)
+        self.assertIn("Bye", answer)
+
+    def test_board_output_drops_placeholder_and_blank_values(self):
+        exact = structured_query.ExactResult(
+            collection="cards", total=1,
+            records=[{
+                "document_id": "1", "name": "Development",
+                "text": "Title: Development; Status: In Progress; Project: Alpha; "
+                        "Description: &nbsp;; Billable: No; Note: •; Extra: &bull;",
+            }],
+            conditions="user = Shubham", complete=True, source="planner",
+        )
+        answer = rag_service._format_board_answer(exact)
+        self.assertIn("Development", answer)
+        self.assertNotIn("• No", answer)
+        self.assertNotIn("&nbsp;", answer)
+        self.assertNotIn("• •", answer)
+        self.assertNotIn("• &bull;", answer)
+
+    def test_semantic_context_strips_logged_time_without_request(self):
+        hit = retrieval.Hit(
+            id="cards:1", collection="cards", primary_id="1", score=1.0,
+            text="Title: Fix login bug\nLogged Time 1 Hours: 2\nLogged Time 1 Description: TRACKED-DETAIL",
+        )
+        hidden, _, _ = rag_service.build_context([[hit]], [], include_logged_time=False)
+        self.assertIn("Fix login bug", hidden)
+        self.assertNotIn("Logged Time", hidden)
+        self.assertNotIn("TRACKED-DETAIL", hidden)
+        shown, _, _ = rag_service.build_context([[hit]], [], include_logged_time=True)
+        self.assertIn("Logged Time", shown)
+        self.assertIn("TRACKED-DETAIL", shown)
+
+>>>>>>> master
     def test_filter_by_a_persons_name_on_a_reference_field(self):
         plan = {"collection": "tasks", "operation": "list",
                 "filters": [{"field": "assignedTo", "op": "eq", "value": "Rohan Mehta"}]}
@@ -1219,6 +1442,75 @@ class StructuredQueryTests(MongoCase):
         self.assertEqual(result["total_matching"], 20)
         self.assertIn("Finance", gen.call_args[0][1])
 
+<<<<<<< HEAD
+=======
+    def test_employee_project_verification(self):
+        shubham = ObjectId()
+        self.db["users"].insert_one({"_id": shubham, "name": "Shubham Dhatwalia", "role": "employee"})
+        leave_b = ObjectId()
+        self.db["boards"].insert_one({"_id": leave_b, "name": "Leave", "status": "planning"})
+        self.db["cards"].insert_many([
+            {"title": "Full Leave", "board": leave_b, "status": "done", "assignees": [shubham]},
+            {"title": "Short Leave", "board": leave_b, "status": "completed", "assignees": [shubham]},
+        ])
+
+        # Test affirmative verification
+        result = structured_query.try_structured("does shubham worked in leave project")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.total, 2)
+        self.assertIn("Yes, Shubham Dhatwalia works on / has worked on project 'Leave'", result.direct_answer)
+        self.assertIn("Full Leave", result.direct_answer)
+        self.assertIn("Short Leave", result.direct_answer)
+
+        # Test negative verification
+        result_neg = structured_query.try_structured("does shubham worked in non_existing project")
+        self.assertIsNotNone(result_neg)
+        self.assertEqual(result_neg.total, 0)
+        self.assertIn("No project matching 'non_existing' was found", result_neg.direct_answer)
+
+    def test_user_attribute_email_and_workspace_lookup(self):
+        ws_id = ObjectId()
+        self.db["workspaces"].insert_one({"_id": ws_id, "name": "FlowTask Inc"})
+        self.db["users"].insert_one({
+            "name": "Dev User", "email": "dev.user@example.com", "role": "developer",
+            "lastActiveWorkspace": ws_id
+        })
+        exact_email = structured_query.try_structured("Dev User's email")
+        self.assertIsNotNone(exact_email)
+        self.assertIn("dev.user@example.com", exact_email.direct_answer)
+
+        exact_ws = structured_query.try_structured("what is Dev User's workspace")
+        self.assertIsNotNone(exact_ws)
+        self.assertIn("FlowTask Inc", exact_ws.direct_answer)
+
+    def test_user_attribute_pronoun_resolution_from_history(self):
+        ws_id = ObjectId()
+        self.db["workspaces"].insert_one({"_id": ws_id, "name": "FlowTask Inc"})
+        self.db["users"].insert_one({
+            "name": "Dev User", "email": "dev.user@example.com", "role": "developer",
+            "lastActiveWorkspace": ws_id
+        })
+        history = [
+            {"question": "did Dev User work on website?", "answer": "Yes, Dev User has worked on the task."}
+        ]
+        exact_pronoun_email = structured_query.try_structured("what is his email", history=history)
+        self.assertIsNotNone(exact_pronoun_email)
+        self.assertIn("dev.user@example.com", exact_pronoun_email.direct_answer)
+
+        exact_pronoun_ws = structured_query.try_structured("what is his workspace", history=history)
+        self.assertIsNotNone(exact_pronoun_ws)
+        self.assertIn("FlowTask Inc", exact_pronoun_ws.direct_answer)
+
+    def test_user_profile_with_trailing_possessive(self):
+        self.db["users"].insert_one({
+            "name": "Dev Lead", "email": "lead@example.com", "role": "lead"
+        })
+        exact = structured_query.try_structured("who is  Dev Lead's")
+        self.assertIsNotNone(exact)
+        self.assertIn("Dev Lead", exact.direct_answer)
+        self.assertIn("lead@example.com", exact.direct_answer)
+
+>>>>>>> master
 
 class LoggedTimeTests(MongoCase):
     """Logged-time questions always read nested `loggedTime` entries on 'cards', completely."""
@@ -1292,6 +1584,34 @@ class LoggedTimeTests(MongoCase):
         self.assertNotIn("SUBTASK-ONLY", result["answer"])
         self.assertNotIn("ACTIVITY-ONLY", result["answer"])
 
+<<<<<<< HEAD
+=======
+    def test_leave_data_is_read_only_from_the_leave_project(self):
+        leave_board = ObjectId()
+        self.db["boards"].insert_one({"_id": leave_board, "name": "Leave"})
+        self.db["cards"].insert_many([
+            {"title": "Full Leave", "board": leave_board, "status": "done",
+             "loggedTime": [{"user": self.aisha["_id"], "hours": 8, "date": "2026-03-01",
+                             "description": "LEAVE-PROJECT"}]},
+            {"title": "Full Leave", "board": self.shop, "status": "done",
+             "loggedTime": [{"user": self.aisha["_id"], "hours": 99, "date": "2026-03-02",
+                             "description": "DECOY-PROJECT"}]},
+            {"title": "Short Leave", "board": self.shop, "status": "done"},
+        ])
+
+        result = structured_query._leave_time_answer(
+            "Show full leave logged time of Aisha Khan",
+            current_user_id=str(self.aisha["_id"]), is_admin=True)
+        self.assertIsNotNone(result)
+        self.assertIn("LEAVE-PROJECT", result.direct_answer)
+        self.assertNotIn("DECOY-PROJECT", result.direct_answer)
+        self.assertIn("Total: 8h 0m", result.direct_answer)
+
+        types = structured_query._leave_types_answer("what leave types are there")
+        self.assertIn("Full Leave", types.direct_answer)
+        self.assertNotIn("Short Leave", types.direct_answer)
+
+>>>>>>> master
     def test_project_scope_only_returns_that_board(self):
         result, search, _, generate = self.ask("Show logged time for ShopEase")
 
@@ -1345,9 +1665,487 @@ class LoggedTimeTests(MongoCase):
         self.assertEqual(result["total_matching"], 0)
         self.assertIn("No logged-time entries were found", result["answer"])
         search.assert_not_called()
+<<<<<<< HEAD
 
 
 @override_settings(STRUCT_PLANNER="on")
+=======
+        self.assertIn("No logged-time entries were found", result["answer"])
+        search.assert_not_called()
+
+    def _superlative_fixture(self):
+        shubham = ObjectId()
+        self.db["users"].insert_one({"_id": shubham, "name": "Shubham", "role": "employee",
+                                   "jobTitle": "frontend developer", "email": "shubham@example.com"})
+        frontend = ObjectId()
+        self.db["boards"].insert_one({"_id": frontend, "name": "Frontend team"})
+        self.db["cards"].insert_many([
+            {"title": "Task A", "board": frontend, "status": "todo",
+             "loggedTime": [{"user": shubham, "hours": 2, "minutes": 30, "date": "2026-01-02",
+                             "description": "did stuff"}]},
+            {"title": "Task B", "board": frontend, "status": "todo",
+             "loggedTime": [{"user": shubham, "hours": 8, "minutes": 0, "date": "2026-01-03",
+                             "description": "did stuff"}]},
+            {"title": "Task C", "board": frontend, "status": "todo",
+             "loggedTime": [{"user": shubham, "hours": 1, "minutes": 0, "date": "2026-01-04",
+                             "description": "did stuff"}]},
+        ])
+        return shubham, frontend
+
+    def test_least_logged_time_returns_the_persons_least_entry(self):
+        shubham, frontend = self._superlative_fixture()
+        result, search, planner, generate = self.ask("What is Shubham least logged time in frontend team?")
+
+        self.assertEqual(result["mode"], "structured")
+        self.assertEqual(result["total_matching"], 1)
+        self.assertIn("Shubham", result["answer"])
+        self.assertIn("Least logged-time", result["answer"])
+        self.assertIn("1h 0m", result["answer"])
+        self.assertIn("Task C", result["answer"])
+        self.assertNotIn("8h 0m", result["answer"])
+        self.assertNotIn("2h 30m", result["answer"])
+        self.assertNotIn("Total:", result["answer"])
+        search.assert_not_called()
+        planner.assert_not_called()
+        generate.assert_not_called()
+
+    def test_least_and_most_logged_time_bilingual_and_task_variations(self):
+        shubham, frontend = self._superlative_fixture()
+
+        # English possessive
+        r1, _, _, _ = self.ask("shubhams least logged time in frontend team?")
+        self.assertEqual(r1["mode"], "structured")
+        self.assertIn("Least logged-time", r1["answer"])
+        self.assertIn("1h 0m", r1["answer"])
+        self.assertNotIn("Total:", r1["answer"])
+
+        # Suffix task
+        r2, _, _, _ = self.ask("shubham least logged time in frontend team task?")
+        self.assertEqual(r2["mode"], "structured")
+        self.assertIn("Least logged-time", r2["answer"])
+        self.assertIn("1h 0m", r2["answer"])
+
+        # Prefix task
+        r3, _, _, _ = self.ask("shubham least logged time in task frontend team?")
+        self.assertEqual(r3["mode"], "structured")
+        self.assertIn("Least logged-time", r3["answer"])
+        self.assertIn("1h 0m", r3["answer"])
+
+        # Hinglish "sabse thoda" + "me"
+        r4, _, _, _ = self.ask("shubham ka sabse thoda logged time frontend team me")
+        self.assertEqual(r4["mode"], "structured")
+        self.assertIn("Least logged-time", r4["answer"])
+        self.assertIn("1h 0m", r4["answer"])
+
+        # Hinglish "sabse kam"
+        r5, _, _, _ = self.ask("shubham ka sabse kam logged time in frontend team")
+        self.assertEqual(r5["mode"], "structured")
+        self.assertIn("Least logged-time", r5["answer"])
+        self.assertIn("1h 0m", r5["answer"])
+
+        # Hinglish "sabse jayda" (most)
+        r6, _, _, _ = self.ask("shubham ka sabse jayda logged time frontend team me")
+        self.assertEqual(r6["mode"], "structured")
+        self.assertIn("Highest logged-time", r6["answer"])
+        self.assertIn("8h 0m", r6["answer"])
+        self.assertIn("Task B", r6["answer"])
+
+        # Role prefix "user", "member", "employee"
+        r7, _, _, _ = self.ask("employee shubham least logged time in frontend team")
+        self.assertEqual(r7["mode"], "structured")
+        self.assertIn("Least logged-time", r7["answer"])
+        self.assertIn("1h 0m", r7["answer"])
+
+        # Inverted "least logged time of shubham"
+        r8, _, _, _ = self.ask("least logged time of shubham in frontend team")
+        self.assertEqual(r8["mode"], "structured")
+        self.assertIn("Least logged-time", r8["answer"])
+        self.assertIn("1h 0m", r8["answer"])
+
+        # Inverted "most logged time of shubham"
+        r9, _, _, _ = self.ask("most logged time of shubham in frontend team")
+        self.assertEqual(r9["mode"], "structured")
+        self.assertIn("Highest logged-time", r9["answer"])
+        self.assertIn("8h 0m", r9["answer"])
+
+    def test_most_logged_time_returns_the_persons_most_entry(self):
+        shubham, frontend = self._superlative_fixture()
+        result, search, planner, generate = self.ask("What is Shubham most logged time in frontend team?")
+
+        self.assertEqual(result["mode"], "structured")
+        self.assertEqual(result["total_matching"], 1)
+        self.assertIn("Shubham", result["answer"])
+        self.assertIn("Highest logged-time", result["answer"])
+        self.assertIn("8h 0m", result["answer"])
+        self.assertIn("Task B", result["answer"])
+        self.assertNotIn("Task C", result["answer"])
+        self.assertNotIn("Total:", result["answer"])
+        search.assert_not_called()
+        planner.assert_not_called()
+        generate.assert_not_called()
+
+    def test_team_superlative_least_logged_time_names_the_least_contributor(self):
+        shubham, frontend = self._superlative_fixture()
+        other = ObjectId()
+        self.db["users"].insert_one({"_id": other, "name": "Rohan Mehta", "role": "employee",
+                                   "jobTitle": "backend developer", "email": "rohan@example.com"})
+        self.db["cards"].insert_one({"title": "Task D", "board": frontend, "status": "todo",
+                                    "loggedTime": [{"user": other, "hours": 40, "minutes": 0, "date": "2026-01-05",
+                                                    "description": "did stuff"}]})
+        result, search, _, _ = self.ask("Who has the least logged time in frontend team?")
+
+        self.assertEqual(result["mode"], "structured")
+        self.assertIn("Shubham", result["answer"])
+        self.assertIn("Least logged-time", result["answer"])
+        self.assertNotIn("Rohan Mehta", result["answer"])
+        self.assertNotIn("Total:", result["answer"])
+        search.assert_not_called()
+        self.assertEqual(result["mode"], "structured")
+        self.assertIn("Shubham", result["answer"])
+        self.assertIn("Least logged-time", result["answer"])
+        self.assertNotIn("Rohan Mehta", result["answer"])
+        self.assertNotIn("Total:", result["answer"])
+        search.assert_not_called()
+
+    def test_personal_least_logged_time_returns_only_the_least_entry(self):
+        aisha = self.db["users"].find_one({"email": "aisha@example.com"})
+        frontend = ObjectId()
+        self.db["boards"].insert_one({"_id": frontend, "name": "Frontend team"})
+        self.db["cards"].insert_many([
+            {"title": "Task A", "board": frontend, "status": "todo",
+             "loggedTime": [{"user": aisha["_id"], "hours": 2, "minutes": 30, "date": "2026-01-02",
+                             "description": "did stuff"}]},
+            {"title": "Task B", "board": frontend, "status": "todo",
+             "loggedTime": [{"user": aisha["_id"], "hours": 8, "minutes": 0, "date": "2026-01-03",
+                             "description": "did stuff"}]},
+        ])
+        result, search, planner, generate = self.ask(
+            "What is my least logged time in frontend team?", user_id=str(aisha["_id"])
+        )
+
+        self.assertEqual(result["mode"], "structured")
+        self.assertEqual(result["total_matching"], 1)
+        self.assertIn("Least logged-time", result["answer"])
+        self.assertIn("Aisha Khan", result["answer"])
+        self.assertIn("2h 30m", result["answer"])
+        self.assertNotIn("Total:", result["answer"])
+        search.assert_not_called()
+        planner.assert_not_called()
+        generate.assert_not_called()
+
+    def test_personal_most_logged_time_returns_only_the_most_entry(self):
+        aisha = self.db["users"].find_one({"email": "aisha@example.com"})
+        frontend = ObjectId()
+        self.db["boards"].insert_one({"_id": frontend, "name": "Frontend team"})
+        self.db["cards"].insert_many([
+            {"title": "Task A", "board": frontend, "status": "todo",
+             "loggedTime": [{"user": aisha["_id"], "hours": 2, "minutes": 30, "date": "2026-01-02",
+                             "description": "did stuff"}]},
+            {"title": "Task B", "board": frontend, "status": "todo",
+             "loggedTime": [{"user": aisha["_id"], "hours": 8, "minutes": 0, "date": "2026-01-03",
+                             "description": "did stuff"}]},
+        ])
+        result, search, planner, generate = self.ask(
+            "What is my most logged time in frontend team?", user_id=str(aisha["_id"])
+        )
+
+        self.assertEqual(result["mode"], "structured")
+        self.assertEqual(result["total_matching"], 1)
+        self.assertIn("Highest logged-time", result["answer"])
+        self.assertIn("Aisha Khan", result["answer"])
+        self.assertIn("8h 0m", result["answer"])
+        self.assertNotIn("Total:", result["answer"])
+        search.assert_not_called()
+        planner.assert_not_called()
+        generate.assert_not_called()
+
+    def test_logged_in_user_may_ask_his_own_most_logged_time(self):
+        shubham = ObjectId()
+        self.db["users"].insert_one({"_id": shubham, "name": "Shubham Post", "role": "employee",
+                                   "jobTitle": "frontend developer", "email": "shubham@example.com"})
+        frontend = ObjectId()
+        self.db["boards"].insert_one({"_id": frontend, "name": "Frontend team"})
+        self.db["cards"].insert_many([
+            {"title": "Task A", "board": frontend, "status": "todo",
+             "loggedTime": [{"user": shubham, "hours": 2, "minutes": 30, "date": "2026-01-02",
+                             "description": "did stuff"}]},
+            {"title": "Task B", "board": frontend, "status": "todo",
+             "loggedTime": [{"user": shubham, "hours": 8, "minutes": 0, "date": "2026-01-03",
+                             "description": "did stuff"}]},
+        ])
+        result, search, _, _ = self.ask(
+            "What is Shubham's most logged time in frontend team?", user_id=str(shubham)
+        )
+
+        self.assertEqual(result["mode"], "structured")
+        self.assertNotIn("not authorized", result["answer"].lower())
+        self.assertEqual(result["total_matching"], 1)
+        self.assertIn("Highest logged-time", result["answer"])
+        self.assertIn("Shubham Post", result["answer"])
+        self.assertIn("8h 0m", result["answer"])
+        self.assertNotIn("Total:", result["answer"])
+        search.assert_not_called()
+
+    def test_date_specific_logged_time_query(self):
+        shubham = ObjectId()
+        self.db["users"].insert_one({"_id": shubham, "name": "Shubham", "role": "employee"})
+        b1 = ObjectId()
+        self.db["boards"].insert_one({"_id": b1, "name": "Web Chat Pingly"})
+        b2 = ObjectId()
+        self.db["boards"].insert_one({"_id": b2, "name": "HubSpot Integration"})
+
+        self.db["cards"].insert_many([
+            {"title": "Pingly Task", "board": b1, "status": "development",
+             "loggedTime": [{"user": shubham, "hours": 5, "minutes": 0, "date": "2026-08-19T12:00:00",
+                             "description": "worked on forms"}]},
+            {"title": "Sync Task", "board": b2, "status": "in-progress",
+             "loggedTime": [{"user": shubham, "hours": 3, "minutes": 0, "date": "2026-08-19T12:00:00",
+                             "description": "syncing points"}]},
+            {"title": "Other Task", "board": b1, "status": "done",
+             "loggedTime": [{"user": shubham, "hours": 2, "minutes": 0, "date": "2026-08-20T12:00:00",
+                             "description": "other day"}]},
+        ])
+
+        result, search, planner, generate = self.ask("on which project did shubham worked on 8-19")
+        self.assertEqual(result["mode"], "structured")
+        self.assertEqual(result["total_matching"], 2)
+        self.assertIn("Web Chat Pingly", result["answer"])
+        self.assertIn("HubSpot Integration", result["answer"])
+        self.assertIn("Pingly Task", result["answer"])
+        self.assertIn("Sync Task", result["answer"])
+        self.assertIn("8h 0m", result["answer"])
+        self.assertNotIn("Other Task", result["answer"])
+        search.assert_not_called()
+
+    def test_relative_date_anchoring_yesterday_and_today(self):
+        from datetime import datetime, timedelta
+        now = datetime.now()
+        yesterday = now - timedelta(days=1)
+        y_iso = yesterday.strftime("%Y-%m-%d") + "T12:00:00"
+
+        shubham = ObjectId()
+        self.db["users"].insert_one({"_id": shubham, "name": "Shubham", "role": "employee"})
+        b1 = ObjectId()
+        self.db["boards"].insert_one({"_id": b1, "name": "Web Chat Pingly"})
+        self.db["cards"].insert_one({
+            "title": "Yesterday Task", "board": b1, "status": "development",
+            "loggedTime": [{"user": shubham, "hours": 4, "minutes": 0, "date": y_iso,
+                            "description": "did yesterday work"}]
+        })
+
+        result, search, _, _ = self.ask("what did shubham work on yesterday")
+        self.assertEqual(result["mode"], "structured")
+        self.assertEqual(result["total_matching"], 1)
+        self.assertIn("Yesterday Task", result["answer"])
+        self.assertIn("4h 0m", result["answer"])
+        search.assert_not_called()
+
+    def test_dynamic_entity_protection_in_spell_checker(self):
+        from rag.services import query_correction
+        self.db["users"].insert_one({"name": "Ubeydullah Khan", "role": "developer"})
+        self.db["boards"].insert_one({"name": "Luciteria-ecomm", "status": "planning"})
+
+        query_correction.clear_vocabulary_cache()
+        vocab, _, _ = query_correction._load_vocabulary()
+        self.assertIn("ubeydullah", vocab)
+        self.assertIn("luciteria", vocab)
+
+        corrected = query_correction.correct_query("What did Ubeydullah work on Luciteria?")
+        self.assertIn("Ubeydullah", corrected)
+        self.assertIn("Luciteria", corrected)
+
+    def test_multichannel_tool_planner_actions(self):
+        plan_logged = {"action": "logged_time", "person": "Shubham", "extremum": "least"}
+        clean = structured_query.validate_plan(plan_logged, {})
+        self.assertIsNotNone(clean)
+        self.assertEqual(clean["action"], "logged_time")
+        self.assertEqual(clean["person"], "Shubham")
+        self.assertEqual(clean["extremum"], "least")
+
+        plan_work = {"action": "employee_work", "person": "Shubham", "project": "Leave", "verify": True}
+        clean_work = structured_query.validate_plan(plan_work, {})
+        self.assertIsNotNone(clean_work)
+        self.assertEqual(clean_work["action"], "employee_work")
+        self.assertTrue(clean_work["verify"])
+
+    def test_leave_superlative_most_full_leave(self):
+        """'who takes most leaves in full leave' returns the person with most leave entries."""
+        leave_board = ObjectId()
+        self.db["boards"].insert_one({"_id": leave_board, "name": "Leave"})
+
+        tisha = ObjectId()
+        mohit = ObjectId()
+        self.db["users"].insert_many([
+            {"_id": tisha, "name": "Tisha Grover", "email": "tisha@example.com", "role": "employee"},
+            {"_id": mohit, "name": "Mohit Thakur", "email": "mohit@example.com", "role": "employee"},
+        ])
+        # Tisha: 3 Full Leave entries, Mohit: 1 entry
+        self.db["cards"].insert_one({
+            "title": "Full Leave", "board": leave_board, "status": "done",
+            "loggedTime": [
+                {"user": tisha, "hours": 8, "minutes": 0, "date": "2026-04-01"},
+                {"user": tisha, "hours": 8, "minutes": 0, "date": "2026-04-02"},
+                {"user": tisha, "hours": 8, "minutes": 0, "date": "2026-04-03"},
+                {"user": mohit, "hours": 8, "minutes": 0, "date": "2026-04-04"},
+            ]
+        })
+
+        result, search, planner, generate = self.ask("who takes most leaves in full leave")
+        self.assertEqual(result["mode"], "structured")
+        self.assertIn("Tisha Grover", result["answer"])
+        self.assertNotIn("Mohit Thakur", result["answer"])
+        search.assert_not_called()
+        planner.assert_not_called()
+        generate.assert_not_called()
+
+    def test_leave_superlative_least_full_leave(self):
+        """'who takes least leaves in full leave' returns the person with fewest leave entries."""
+        leave_board = ObjectId()
+        self.db["boards"].insert_one({"_id": leave_board, "name": "Leave"})
+
+        tisha = ObjectId()
+        mohit = ObjectId()
+        self.db["users"].insert_many([
+            {"_id": tisha, "name": "Tisha Grover", "email": "tisha@example.com", "role": "employee"},
+            {"_id": mohit, "name": "Mohit Thakur", "email": "mohit@example.com", "role": "employee"},
+        ])
+        # Tisha: 3 entries, Mohit: 1 entry → Mohit takes least
+        self.db["cards"].insert_one({
+            "title": "Full Leave", "board": leave_board, "status": "done",
+            "loggedTime": [
+                {"user": tisha, "hours": 8, "minutes": 0, "date": "2026-04-01"},
+                {"user": tisha, "hours": 8, "minutes": 0, "date": "2026-04-02"},
+                {"user": tisha, "hours": 8, "minutes": 0, "date": "2026-04-03"},
+                {"user": mohit, "hours": 8, "minutes": 0, "date": "2026-04-04"},
+            ]
+        })
+
+        result, search, planner, generate = self.ask("who takes least leaves in full leave")
+        self.assertEqual(result["mode"], "structured")
+        self.assertIn("Mohit Thakur", result["answer"])
+        self.assertNotIn("Tisha Grover", result["answer"])
+        search.assert_not_called()
+        planner.assert_not_called()
+        generate.assert_not_called()
+
+    def test_leave_superlative_alternate_phrasings(self):
+        """Alternate phrasings of leave superlatives all route correctly."""
+        leave_board = ObjectId()
+        self.db["boards"].insert_one({"_id": leave_board, "name": "Leave"})
+        aisha = self.db["users"].find_one({"email": "aisha@example.com"})
+        rohan = self.db["users"].find_one({"email": "rohan@example.com"})
+        # Aisha: 2 entries, Rohan: 1 entry
+        self.db["cards"].insert_one({
+            "title": "Full Leave", "board": leave_board, "status": "done",
+            "loggedTime": [
+                {"user": aisha["_id"], "hours": 8, "minutes": 0, "date": "2026-05-01"},
+                {"user": aisha["_id"], "hours": 8, "minutes": 0, "date": "2026-05-02"},
+                {"user": rohan["_id"], "hours": 8, "minutes": 0, "date": "2026-05-03"},
+            ]
+        })
+        for question in [
+            "Who takes the highest number of full-day leaves?",
+            "Which employee takes full-day leave most frequently?",
+            "who takes the most leaves",
+        ]:
+            result, search, _, _ = self.ask(question)
+            self.assertEqual(result["mode"], "structured", msg=f"Not structured for: {question!r}")
+            self.assertIn("Aisha Khan", result["answer"], msg=f"Wrong winner for: {question!r}")
+            search.assert_not_called()
+
+    def test_who_has_less_or_most_logged_time_in_project(self):
+        """'who has less logged time in X' and 'who has most logged time in X'
+        must not misidentify 'less' or 'ha' (from 'has') as person names."""
+        test_board = ObjectId()
+        self.db["boards"].insert_one({"_id": test_board, "name": "new test"})
+        aisha = self.db["users"].find_one({"email": "aisha@example.com"})
+        rohan = self.db["users"].find_one({"email": "rohan@example.com"})
+
+        # Aisha has 1 hour, Rohan has 5 hours in "new test"
+        self.db["cards"].insert_one({
+            "title": "testing task", "board": test_board, "status": "in-progress",
+            "loggedTime": [
+                {"user": aisha["_id"], "hours": 1, "minutes": 0, "date": "2026-06-01"},
+                {"user": rohan["_id"], "hours": 5, "minutes": 0, "date": "2026-06-02"},
+            ]
+        })
+
+        # Test "less"
+        r_less, search, _, _ = self.ask("who has less logged time in new test")
+        self.assertEqual(r_less["mode"], "structured")
+        self.assertIn("Aisha Khan", r_less["answer"])
+        self.assertNotIn("Rohan Mehta", r_less["answer"])
+        self.assertNotIn("No logged-time entries were found for 'less'", r_less["answer"])
+        search.assert_not_called()
+
+        # Test "less ... task"
+        r_less_task, _, _, _ = self.ask("who has less logged time in new test task")
+        self.assertEqual(r_less_task["mode"], "structured")
+        self.assertIn("Aisha Khan", r_less_task["answer"])
+
+        # Test "most" ("who has" must not extract person="ha")
+        r_most, search, _, _ = self.ask("who has most logged time in new test task")
+        self.assertEqual(r_most["mode"], "structured")
+        self.assertIn("Rohan Mehta", r_most["answer"])
+        self.assertNotIn("Aisha Khan", r_most["answer"])
+        self.assertNotIn("No logged-time entries were found for 'ha'", r_most["answer"])
+        search.assert_not_called()
+
+        # Test plural project name / match: "Articles submissions"
+        articles_board = ObjectId()
+        self.db["boards"].insert_one({"_id": articles_board, "name": "Articles Submission"})
+        self.db["cards"].insert_one({
+            "title": "Writing", "board": articles_board, "status": "done",
+            "loggedTime": [
+                {"user": aisha["_id"], "hours": 2, "minutes": 0, "date": "2026-06-01"},
+                {"user": rohan["_id"], "hours": 8, "minutes": 0, "date": "2026-06-02"},
+            ]
+        })
+        r_articles, search, _, _ = self.ask("who has most logged time in Articles submissions")
+        self.assertEqual(r_articles["mode"], "structured")
+        self.assertIn("Rohan Mehta", r_articles["answer"])
+        self.assertNotIn("No logged-time entries were found for 'ha'", r_articles["answer"])
+        search.assert_not_called()
+
+    def test_leave_superlative_less_and_most_logged_time_in_half_day_leave(self):
+        """'who has less logged time in half day leave' vs 'who has most logged time in half day leave'
+        must return the correct opposite extremum results without confusing less with most."""
+        leave_board = ObjectId()
+        self.db["boards"].insert_one({"_id": leave_board, "name": "Leave"})
+        aisha = self.db["users"].find_one({"email": "aisha@example.com"})
+        rohan = self.db["users"].find_one({"email": "rohan@example.com"})
+
+        # Aisha has 4h (1 entry), Rohan has 16h (3 entries) in Halfday Leave
+        self.db["cards"].insert_one({
+            "title": "Halfday Leave", "board": leave_board, "status": "done",
+            "loggedTime": [
+                {"user": aisha["_id"], "hours": 4, "minutes": 0, "date": "2026-07-01"},
+                {"user": rohan["_id"], "hours": 5, "minutes": 0, "date": "2026-07-02"},
+                {"user": rohan["_id"], "hours": 5, "minutes": 0, "date": "2026-07-03"},
+                {"user": rohan["_id"], "hours": 6, "minutes": 0, "date": "2026-07-04"},
+            ]
+        })
+
+        # "less logged time in half day leave" -> must return Aisha (4h), not Rohan (16h)
+        r_less, search, _, _ = self.ask("who has less logged time in half day  leave")
+        self.assertEqual(r_less["mode"], "structured")
+        self.assertIn("Aisha Khan", r_less["answer"])
+        self.assertIn("least", r_less["answer"].lower())
+        self.assertNotIn("Rohan Mehta", r_less["answer"])
+        search.assert_not_called()
+
+        # "most logged time in half day leave" -> must return Rohan (16h), not Aisha (4h)
+        r_most, search, _, _ = self.ask("who has most logged time in half day  leave")
+        self.assertEqual(r_most["mode"], "structured")
+        self.assertIn("Rohan Mehta", r_most["answer"])
+        self.assertIn("most", r_most["answer"].lower())
+        self.assertNotIn("Aisha Khan", r_most["answer"])
+        search.assert_not_called()
+
+
+@override_settings(STRUCT_PLANNER="on")
+
+>>>>>>> master
 class SpeedAndResilienceTests(MongoCase):
     """The exact path must stay fast and must never fail just because the language model does."""
 

@@ -243,6 +243,7 @@ def rebuild_index() -> VectorIndex:
         return fresh
 
 
+<<<<<<< HEAD
 def is_ready() -> bool:
     """Return True if the index is already in memory or files exist on disk."""
     global _index
@@ -251,6 +252,8 @@ def is_ready() -> bool:
     return _stamp_now() is not None
 
 
+=======
+>>>>>>> master
 def get_index() -> VectorIndex:
     """Return the loaded index. Reloads when another process wrote a newer one; rebuilds if missing."""
     global _index, _stamp

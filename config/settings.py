@@ -90,6 +90,7 @@ CSRF_COOKIE_SECURE = not DEBUG
 SESSION_COOKIE_AGE = 60 * 60 * 12
 CORS_ALLOWED_ORIGINS = _list(
     "DJANGO_CORS_ALLOWED_ORIGINS",
+<<<<<<< HEAD
     "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,https://chatbot-frontend-1gbi.onrender.com",
 )
 CORS_ALLOW_CREDENTIALS = True
@@ -118,6 +119,12 @@ CORS_ALLOW_HEADERS = [
     "x-csrftoken",
     "x-requested-with",
 ]
+=======
+    "http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173",
+)
+CORS_ALLOW_CREDENTIALS = True
+CORS_URLS_REGEX = r"^/api/.*$"
+>>>>>>> master
 REST_FRAMEWORK = {
     "UNAUTHENTICATED_USER": None,
     "UNAUTHENTICATED_TOKEN": None,
@@ -210,6 +217,12 @@ MAX_RELATED = max(0, _int("MAX_RELATED", 6))
 INCLUDE_REVERSE = _bool("INCLUDE_REVERSE", True)   # also find records that point AT a hit
 REVERSE_PER_RECORD = max(1, _int("REVERSE_PER_RECORD", 3))
 MAX_CONTEXT_CHARS = _int("MAX_CONTEXT_CHARS", 6000 if _LOCAL else 12000)
+<<<<<<< HEAD
+=======
+# Conversation memory: the last 50 turns are retained, but only this many characters of
+# older turns are sent to the language model so the prompt stays within its context window.
+MAX_HISTORY_CHARS = _int("MAX_HISTORY_CHARS", 8000 if _LOCAL else 24000)
+>>>>>>> master
 # List-style questions ("list all...", "which projects...", "how many...") automatically retrieve more.
 # Set LIST_TOP_K=0 to turn this off.
 LIST_TOP_K = max(0, _int("LIST_TOP_K", 20 if _LOCAL else 30))
@@ -271,7 +284,13 @@ DEFAULT_COLLECTION_ALIASES = {
     "users": "users",
     "staff": "users",
     "person": "users",
+<<<<<<< HEAD
     "people": "users",
+=======
+    "persons": "users",
+    "people": "users",
+    "peoples": "users",
+>>>>>>> master
     "department": "departments",
     "departments": "departments",
     "workspace": "workspaces",
@@ -374,5 +393,9 @@ PLANNER_MODEL = os.getenv("PLANNER_MODEL", "").strip()
 # ------------------------------------------------------------------- Cache
 CACHE_TTL_SECONDS = _int("CACHE_TTL_SECONDS", 600)   # 0 disables the answer cache
 CACHE_MAX_ENTRIES = _int("CACHE_MAX_ENTRIES", 500)
+<<<<<<< HEAD
 _default_warmup = not bool(os.getenv("RENDER"))
 WARMUP_ON_START = _bool("WARMUP_ON_START", _default_warmup)
+=======
+WARMUP_ON_START = _bool("WARMUP_ON_START", True)
+>>>>>>> master
