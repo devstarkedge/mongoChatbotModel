@@ -37,8 +37,6 @@ def _id_values(user_id: str) -> list:
     return values
 
 
-<<<<<<< HEAD
-=======
 def mentions_current_user(question: str, user_id: str, current_user_name: str | None = None) -> bool:
     """True when the question also refers to the signed-in account."""
     text = question or ""
@@ -54,7 +52,6 @@ def mentions_current_user(question: str, user_id: str, current_user_name: str | 
     return bool(re.search(r"\b(?:me|my|mine|myself|i|i'm|i am)\b", text, re.IGNORECASE))
 
 
->>>>>>> master
 def mentions_another_user(question: str, user_id: str, current_user_name: str | None = None) -> bool:
     """Detect explicit references to another account without returning its data."""
     tokens = {token for token in re.findall(r"[\w.@+-]+", question) if len(token) >= 3}

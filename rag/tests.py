@@ -412,8 +412,6 @@ class SearchTests(MongoCase):
         ):
             rag_service.ask("Who is Rohan Mehta?", user_id=aisha_id)
 
-<<<<<<< HEAD
-=======
     def test_mixed_self_and_another_user_query_is_allowed_but_scoped(self):
         aisha_id = str(self.db["users"].find_one({"email": "aisha@example.com"})["_id"])
         scope = self.real_resolve_scope(aisha_id)
@@ -438,7 +436,6 @@ class SearchTests(MongoCase):
         self.assertFalse(authorization_service.mentions_current_user(
             "Who is Rohan Mehta?", aisha_id, "Aisha Khan"))
 
->>>>>>> master
     def test_admin_search_can_access_all_records(self):
         self.ingest()
         result = rag_service.search("Fix login bug", user_id=self.admin_id, hybrid=False)
@@ -626,12 +623,8 @@ class AskTests(MongoCase):
             rag_service.chat_memory.add(session_id, f"question {index}", f"answer {index}", owner_id=owner_id)
 
         result = rag_service.ask(
-<<<<<<< HEAD
-            "hello", session_id=session_id, edit_index=11, user_id=self.admin_id)
-=======
             "hello", session_id=session_id,
             edit_index=rag_service.chat_memory.MAX_TURNS + 1, user_id=self.admin_id)
->>>>>>> master
 
         state = rag_service.chat_memory.get_state(session_id, owner_id=owner_id)
         self.assertEqual(result["mode"], "conversational")
@@ -639,8 +632,6 @@ class AskTests(MongoCase):
         self.assertEqual(len(state["turns"]), rag_service.chat_memory.MAX_TURNS)
         self.assertEqual(state["turns"][-1]["question"], "hello")
 
-<<<<<<< HEAD
-=======
     def test_chat_memory_retains_twenty_previous_turns(self):
         session_id = "ca11c014ab"
         owner_id = f"{self.admin_id}:admin"
@@ -656,7 +647,6 @@ class AskTests(MongoCase):
         self.assertEqual(state["turns"][0]["question"], "question 3")
         self.assertEqual(state["turns"][-1]["question"], "question 22")
 
->>>>>>> master
     def test_editing_turn_outside_retained_history_has_clear_error(self):
         session_id = "ca11c013ab"
         owner_id = f"{self.admin_id}:admin"
@@ -664,11 +654,7 @@ class AskTests(MongoCase):
         for index in range(rag_service.chat_memory.MAX_TURNS + 2):
             rag_service.chat_memory.add(session_id, f"question {index}", f"answer {index}", owner_id=owner_id)
 
-<<<<<<< HEAD
-        with self.assertRaisesRegex(InvalidRequestError, "outside the 10-turn edit history"):
-=======
         with self.assertRaisesRegex(InvalidRequestError, r"outside the \d+-turn edit history"):
->>>>>>> master
             rag_service.ask("hello", session_id=session_id, edit_index=1, user_id=self.admin_id)
 
     def test_admin_cannot_reopen_legacy_global_chat_history(self):
@@ -1025,12 +1011,8 @@ class ApiTests(MongoCase):
         self.assertEqual(len(existing_history["turns"]), rag_service.chat_memory.MAX_TURNS)
 
         response = self.post("/api/ask/", {
-<<<<<<< HEAD
-            "question": "hello", "session_id": session_id, "edit_index": 11,
-=======
             "question": "hello", "session_id": session_id,
             "edit_index": rag_service.chat_memory.MAX_TURNS + 1,
->>>>>>> master
         })
 
         self.assertEqual(response.status_code, 200, response.content)
@@ -1174,8 +1156,6 @@ class StructuredQueryTests(MongoCase):
             result = structured_query.try_structured("department wise?", history=history)
         self.assertIsNone(result)
 
-<<<<<<< HEAD
-=======
     def test_elliptical_followup_reuses_the_person_from_an_earlier_turn(self):
         self.db["boards"].insert_many([
             {"_id": p["_id"], "name": p["project"], "status": p["status"]}
@@ -1337,7 +1317,6 @@ class StructuredQueryTests(MongoCase):
         self.assertIn("Logged Time", shown)
         self.assertIn("TRACKED-DETAIL", shown)
 
->>>>>>> master
     def test_filter_by_a_persons_name_on_a_reference_field(self):
         plan = {"collection": "tasks", "operation": "list",
                 "filters": [{"field": "assignedTo", "op": "eq", "value": "Rohan Mehta"}]}
@@ -1442,8 +1421,6 @@ class StructuredQueryTests(MongoCase):
         self.assertEqual(result["total_matching"], 20)
         self.assertIn("Finance", gen.call_args[0][1])
 
-<<<<<<< HEAD
-=======
     def test_employee_project_verification(self):
         shubham = ObjectId()
         self.db["users"].insert_one({"_id": shubham, "name": "Shubham Dhatwalia", "role": "employee"})
@@ -1510,7 +1487,6 @@ class StructuredQueryTests(MongoCase):
         self.assertIn("Dev Lead", exact.direct_answer)
         self.assertIn("lead@example.com", exact.direct_answer)
 
->>>>>>> master
 
 class LoggedTimeTests(MongoCase):
     """Logged-time questions always read nested `loggedTime` entries on 'cards', completely."""
@@ -1584,8 +1560,6 @@ class LoggedTimeTests(MongoCase):
         self.assertNotIn("SUBTASK-ONLY", result["answer"])
         self.assertNotIn("ACTIVITY-ONLY", result["answer"])
 
-<<<<<<< HEAD
-=======
     def test_leave_data_is_read_only_from_the_leave_project(self):
         leave_board = ObjectId()
         self.db["boards"].insert_one({"_id": leave_board, "name": "Leave"})
@@ -1611,7 +1585,6 @@ class LoggedTimeTests(MongoCase):
         self.assertIn("Full Leave", types.direct_answer)
         self.assertNotIn("Short Leave", types.direct_answer)
 
->>>>>>> master
     def test_project_scope_only_returns_that_board(self):
         result, search, _, generate = self.ask("Show logged time for ShopEase")
 
@@ -1665,11 +1638,6 @@ class LoggedTimeTests(MongoCase):
         self.assertEqual(result["total_matching"], 0)
         self.assertIn("No logged-time entries were found", result["answer"])
         search.assert_not_called()
-<<<<<<< HEAD
-
-
-@override_settings(STRUCT_PLANNER="on")
-=======
         self.assertIn("No logged-time entries were found", result["answer"])
         search.assert_not_called()
 
@@ -2145,7 +2113,6 @@ class LoggedTimeTests(MongoCase):
 
 @override_settings(STRUCT_PLANNER="on")
 
->>>>>>> master
 class SpeedAndResilienceTests(MongoCase):
     """The exact path must stay fast and must never fail just because the language model does."""
 

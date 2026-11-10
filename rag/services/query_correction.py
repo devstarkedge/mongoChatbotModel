@@ -4,11 +4,7 @@ import re
 import threading
 from collections import Counter, defaultdict
 
-<<<<<<< HEAD
-from . import embedding_store
-=======
 from . import embedding_store, mongo_service
->>>>>>> master
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +17,6 @@ _MASKED = re.compile(r"(?<!\w)([A-Za-z0-9][A-Za-z0-9*#?•]{2,})(?!\w)")
 _MASK_CHARS = re.compile(r"[*#?•]+")
 _MORPH_SUFFIXES = ("", "s", "es", "ed", "ing", "er", "ers", "ment", "ments", "tion", "tions")
 
-<<<<<<< HEAD
-=======
 _PROTECTED_WORDS = {
     # Superlatives, comparatives, extremums
     "least", "most", "lowest", "highest", "minimum", "maximum", "min", "max",
@@ -52,7 +46,6 @@ _PROTECTED_WORDS = {
     "doc", "docs", "document", "documents", "documentation", "new", "old",
 }
 
->>>>>>> master
 
 def _distance_within(left: str, right: str, limit: int) -> int | None:
     """Return edit distance up to limit, treating a neighboring transposition as one edit."""
@@ -80,11 +73,8 @@ def _load_vocabulary():
     with _lock:
         if _vocabulary is None:
             counts = Counter()
-<<<<<<< HEAD
-=======
             for term in _PROTECTED_WORDS:
                 counts[term] = 50
->>>>>>> master
             try:
                 cursor = embedding_store.collection().find({}, {"text": 1})
                 for doc in cursor:
@@ -92,8 +82,6 @@ def _load_vocabulary():
                                   if len(token) >= 3)
             except Exception:
                 logger.exception("Could not build the query spelling vocabulary")
-<<<<<<< HEAD
-=======
 
             # Dynamically index and protect domain entity names (users, boards, departments)
             try:
@@ -124,7 +112,6 @@ def _load_vocabulary():
                                     counts[tok.lower()] = max(counts[tok.lower()], 100)
             except Exception:
                 logger.debug("Could not index dynamic entity names for spelling vocabulary", exc_info=True)
->>>>>>> master
             by_length = defaultdict(list)
             by_prefix = defaultdict(list)
             for word in counts:
@@ -206,13 +193,10 @@ _NORMALIZATIONS = (
     (r"\bseo\b", "SEO"),
     (r"\bhr\b", "HR"),
     (r"\bit\b", "IT"),
-<<<<<<< HEAD
-=======
     (r"\b(time|hours?|logged|work|project|task|board)of\b", r"\1 of"),
     (r"\b(time|hours?|logged|work|project|task|board)in\b", r"\1 in"),
     (r"\b(time|hours?|logged|work|project|task|board)for\b", r"\1 for"),
     (r"\b(time|hours?|logged|work|project|task|board)by\b", r"\1 by"),
->>>>>>> master
 )
 
 _NORMALIZED = [(re.compile(p, re.IGNORECASE), r) for p, r in _NORMALIZATIONS]
@@ -247,11 +231,7 @@ def correct_query(query: str) -> str:
     def repair_spelling(match):
         original = match.group(0)
         word = original.lower()
-<<<<<<< HEAD
-        if len(word) < 4 or word in vocabulary:
-=======
         if len(word) < 4 or word in vocabulary or word in _PROTECTED_WORDS:
->>>>>>> master
             return original
         corrected = _best_spelling(word, vocabulary, by_length, by_prefix)
         if not corrected:
