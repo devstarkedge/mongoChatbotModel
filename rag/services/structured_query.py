@@ -25,6 +25,7 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from bson import ObjectId
@@ -1540,6 +1541,12 @@ _MONTH_MAP = {
     "nov": 11, "november": 11, "dec": 12, "december": 12,
 }
 
+_THIS_PERIOD_PATTERN = re.compile(r"\bthis\s+(week|month|year|quarter|semester|half[\s-]?year|halfyear)\b", re.IGNORECASE)
+_BARE_YEAR_PATTERN = re.compile(r"\b(\d{4})\b", re.IGNORECASE)
+_BARE_MONTH_PATTERN = re.compile(
+    r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b",
+    re.IGNORECASE)
+
 
 def _extract_date_from_question(text: str, anchor=None):
     """Extract (year, month, day) from question text if present (supports relative dates)."""
@@ -1589,6 +1596,156 @@ def _extract_date_from_question(text: str, anchor=None):
             return year, num1, num2
         if 1 <= num2 <= 12 and 1 <= num1 <= 31:
             return year, num2, num1
+    # 5. Bare month name (e.g. "September", "Aug", "December 2026") -> month scope
+    m_month = _BARE_MONTH_PATTERN.search(text)
+    if m_month:
+        month = _MONTH_MAP[m_month.group(1).lower()[:3]]
+        year = None
+        yr_m = _BARE_YEAR_PATTERN.search(text)
+        if yr_m:
+            year = int(yr_m.group(1))
+        if year is None:
+            year = (anchor or datetime.now()).year
+        return year, month, None
+    # 6. Bare year (e.g. "2026") -> year scope
+    m_year = _BARE_YEAR_PATTERN.search(text)
+    if m_year and not re.search(r"\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b", text):
+        return int(m_year.group(1)), None, None
+    return None
+
+
+def _coerce_entry_dt(d_val):
+    """-> datetime | None: entries may store dates as datetimes or as strings like "2026-01-02" / "2026-08-19T12:00:00"."""
+    if d_val is None:
+        return None
+    if hasattr(d_val, "year") and hasattr(d_val, "month") and hasattr(d_val, "day"):
+        if isinstance(d_val, datetime):
+            return d_val
+        return datetime(d_val.year, d_val.month, d_val.day)
+    if isinstance(d_val, str):
+        m = re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", d_val)
+        if m:
+            return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        m = re.search(r"(\d{1,2})[-/](\d{1,2})", d_val)
+        if m:
+            return datetime(datetime.now().year, int(m.group(1)), int(m.group(2)))
+    return None
+
+
+def _extract_period(text: str, anchor=None) -> dict | None:
+    """Resolve the time scope of a question -> period descriptor, or None when unscoped.
+
+    Returned shape: {"kind": "day" | "month" | "year" | "week", "year", "month", "day", "start", "end"}
+      day   -> start == end == the day
+      month -> start .. end of that month
+      year  -> start .. end of that year
+      week  -> start .. end of the week containing the anchor
+    """
+    text = " ".join((text or "").split())
+    if not text:
+        return None
+    anchor = anchor or datetime.now()
+
+    exact = _extract_date_from_question(text, anchor=anchor)
+    if exact and exact[2] is not None:
+        year = exact[0] or anchor.year
+        month = exact[1] or 1
+        day = exact[2] or 1
+        start = datetime(year, month, day)
+        return {"kind": "day", "year": year, "month": exact[1], "day": exact[2], "start": start, "end": start}
+
+    m_this = _THIS_PERIOD_PATTERN.search(text)
+    if m_this:
+        what = m_this.group(1).lower()
+        if what == "week":
+            start = anchor - timedelta(days=anchor.weekday())
+            return {"kind": "week", "year": start.year, "month": start.month, "day": start.day,
+                    "start": start, "end": start + timedelta(days=6)}
+        if what == "month":
+            start = anchor.replace(day=1)
+            end = (start + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+            return {"kind": "month", "year": start.year, "month": start.month, "day": None,
+                    "start": start, "end": end}
+        if what == "year":
+            start = anchor.replace(month=1, day=1)
+            end = start.replace(year=anchor.year + 1) - timedelta(days=1)
+            return {"kind": "year", "year": start.year, "month": None, "day": None,
+                    "start": start, "end": end}
+
+    m_month = _BARE_MONTH_PATTERN.search(text)
+    if m_month:
+        month = _MONTH_MAP[m_month.group(1).lower()[:3]]
+        year = None
+        yr_m = _BARE_YEAR_PATTERN.search(text)
+        if yr_m:
+            year = int(yr_m.group(1))
+        if year is None:
+            year = anchor.year
+        start = datetime(year, month, 1)
+        end = (start + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+        return {"kind": "month", "year": year, "month": month, "day": None, "start": start, "end": end}
+
+    m_year = _BARE_YEAR_PATTERN.search(text)
+    if m_year and not re.search(r"\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b", text):
+        year = int(m_year.group(1))
+        start = datetime(year, 1, 1)
+        end = datetime(year, 12, 31, 23, 59, 59)
+        return {"kind": "year", "year": year, "month": None, "day": None, "start": start, "end": end}
+
+    return None
+
+
+def _entry_in_period(d_val, period) -> bool:
+    """True when the entry date falls inside the resolved period."""
+    if not period:
+        return True
+    kind = period.get("kind")
+    if kind == "day":
+        e = _coerce_entry_dt(d_val)
+        if not e:
+            return False
+        return (e.year, e.month, e.day) == (period.get("year"), period.get("month"), period.get("day"))
+    if kind == "month":
+        e = _coerce_entry_dt(d_val)
+        if not e:
+            return False
+        month = period.get("month")
+        return bool(month) and e.month == month and (period.get("year") is None or e.year == period.get("year"))
+    if kind == "year":
+        e = _coerce_entry_dt(d_val)
+        if not e:
+            return False
+        year = period.get("year")
+        return year is None or e.year == year
+    if kind == "week":
+        e = _coerce_entry_dt(d_val)
+        if not e:
+            return False
+        week_start = datetime(e.year, e.month, e.day) - timedelta(days=e.weekday())
+        return week_start == period.get("start")
+    return True
+
+
+def _period_label(period) -> str | None:
+    """Human label for the resolved period, e.g. "2026-09-11" (day), "2026-09" (month), "2026" (year), "2026-11-09" (week)."""
+    if not period:
+        return None
+    kind = period.get("kind")
+    if kind == "week":
+        start = period.get("start")
+        return start.strftime("%Y-%m-%d") if start else None
+    if kind == "month":
+        year, month = period.get("year"), period.get("month")
+        if not month:
+            return None
+        return f"{year}-{month:02d}" if year else f"{month:02d}"
+    if kind == "year":
+        return str(period.get("year"))
+    if kind == "day":
+        year, month, day = period.get("year"), period.get("month"), period.get("day")
+        if not month or not day:
+            return None
+        return f"{year}-{month:02d}-{day:02d}" if year else f"{month:02d}-{day:02d}"
     return None
 
 
@@ -1801,6 +1958,11 @@ def _leave_time_answer(question: str, history: list = None, current_user_id: str
     personal = bool(current_user_id and re.search(r"\b(?:my|mine|myself)\b", text, re.IGNORECASE))
     requested_person = None if personal else _logged_time_person_candidate(text)
     target_date = _extract_date_from_question(text)
+    # Month/year/week scoping ("who has highest leaves in august month"): like
+    # _logged_time_answer, use the period range so month-only questions do not
+    # require an exact day.
+    period = _extract_period(text)
+    target_date = None if period is not None else target_date
 
     db = mongo_service.get_db()
     person_name, person_ids = None, []
@@ -1868,23 +2030,18 @@ def _leave_time_answer(question: str, history: list = None, current_user_id: str
             user_id = _logged_time_entry_user(entry)
             if person_ids and user_id not in {str(value) for value in person_ids}:
                 continue
-            if target_date:
+            d_val = entry.get("date") or entry.get("createdAt")
+            if period is not None:
+                if not _entry_in_period(d_val, period):
+                    continue
+            elif target_date:
                 t_year, t_month, t_day = target_date
-                d_val = entry.get("date") or entry.get("createdAt")
                 if not d_val:
                     continue
-                e_year, e_month, e_day = None, None, None
-                if hasattr(d_val, "year") and hasattr(d_val, "month") and hasattr(d_val, "day"):
-                    e_year, e_month, e_day = d_val.year, d_val.month, d_val.day
-                elif isinstance(d_val, str):
-                    m_d = re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", d_val)
-                    if m_d:
-                        e_year, e_month, e_day = int(m_d.group(1)), int(m_d.group(2)), int(m_d.group(3))
-                    else:
-                        m_d2 = re.search(r"(\d{1,2})[-/](\d{1,2})", d_val)
-                        if m_d2:
-                            e_month, e_day = int(m_d2.group(1)), int(m_d2.group(2))
-                if e_month != t_month or e_day != t_day:
+                e = _coerce_entry_dt(d_val)
+                e_year, e_month, e_day = (e.year, e.month, e.day) if e else (None, None, None)
+                # A month-only target (day=None) matches every day in that month.
+                if e_month != t_month or (t_day is not None and e_day != t_day):
                     continue
                 if t_year is not None and e_year is not None and e_year != t_year:
                     continue
@@ -1921,12 +2078,17 @@ def _leave_time_answer(question: str, history: list = None, current_user_id: str
             })
 
     if not matched:
+        date_suffix = ""
+        if period is not None:
+            date_suffix = f" in {_period_label(period)}" if _period_label(period) else ""
+        elif target_date:
+            date_suffix = f" on {target_date[0]}-{target_date[1]:02d}" + (f"-{target_date[2]:02d}" if target_date[2] else "")
         scope = (f"'{person_name}'" if person_name else "")
         if leave_type:
             scope = f"{scope} in '{leave_type}' tasks".strip()
         conditions = f"loggedTime.user = {person_name}" if person_name else f"leave type = {leave_type or 'leave'}"
         return _leave_time_empty(person_name, leave_type,
-                                 f"No nested loggedTime entries matched in 'cards' for {scope}.")
+                                 f"No nested loggedTime entries matched in 'cards' for {scope}{date_suffix}.")
 
     user_names = _logged_time_user_names(db, {item["person_id"] for item in matched if item["person_id"]})
     for item in matched:
@@ -2380,11 +2542,9 @@ def _logged_time_answer(question: str, history: list = None, current_user_id: st
     candidate_person = _logged_time_person_candidate(text)
     if not candidate_person and not re.search(r"^(?:who|which\s+(?:employee|user|member|person|contributor|staff))\b", text, re.IGNORECASE):
         candidate_person = _employee_name_from_question(text)
+    period = _extract_period(text)
     target_date = _extract_date_from_question(text)
-    target_date_str = None
-    if target_date:
-        t_y, t_m, t_d = target_date
-        target_date_str = f"{t_y}-{t_m:02d}-{t_d:02d}" if t_y else f"{t_m:02d}-{t_d:02d}"
+    target_date_str = _period_label(period)
     personal = bool(
         current_user_id and
         not candidate_person and
@@ -2501,22 +2661,16 @@ def _logged_time_answer(question: str, history: list = None, current_user_id: st
             user_id = _logged_time_entry_user(entry)
             if person_ids and user_id not in {str(value) for value in person_ids}:
                 continue
-            if target_date:
+            d_val = entry.get("date") or entry.get("createdAt")
+            if period is not None:
+                if not _entry_in_period(d_val, period):
+                    continue
+            elif target_date:
                 t_year, t_month, t_day = target_date
-                d_val = entry.get("date") or entry.get("createdAt")
                 if not d_val:
                     continue
-                e_year, e_month, e_day = None, None, None
-                if hasattr(d_val, "year") and hasattr(d_val, "month") and hasattr(d_val, "day"):
-                    e_year, e_month, e_day = d_val.year, d_val.month, d_val.day
-                elif isinstance(d_val, str):
-                    m_d = re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", d_val)
-                    if m_d:
-                        e_year, e_month, e_day = int(m_d.group(1)), int(m_d.group(2)), int(m_d.group(3))
-                    else:
-                        m_d2 = re.search(r"(\d{1,2})[-/](\d{1,2})", d_val)
-                        if m_d2:
-                            e_month, e_day = int(m_d2.group(1)), int(m_d2.group(2))
+                e = _coerce_entry_dt(d_val)
+                e_year, e_month, e_day = (e.year, e.month, e.day) if e else (None, None, None)
                 if e_month != t_month or e_day != t_day:
                     continue
                 if t_year is not None and e_year is not None and e_year != t_year:
@@ -2557,7 +2711,7 @@ def _logged_time_answer(question: str, history: list = None, current_user_id: st
             })
 
     if not matched:
-        date_suffix = f" on {target_date_str}" if target_date else ""
+        date_suffix = f" on {target_date_str}" if target_date_str else ""
         scope = (f"'{person_name}'" if person_name else f"project '{requested_project}'"
                  if requested_project else "the cards collection")
         conditions = ("loggedTime.user = " + str(person_name) if person_name else
@@ -2585,6 +2739,7 @@ def _logged_time_answer(question: str, history: list = None, current_user_id: st
     )
     extremum = "least" if min_pat.search(scope_text) else "most" if max_pat.search(scope_text) else None
 
+    team_ranking = False
     if extremum and not person_name and not personal:
         # Team-level superlative (question like "who has the least logged time in the frontend team?"):
         # rank every contributor in the scoped project(s) by their total logged time and
@@ -2605,11 +2760,22 @@ def _logged_time_answer(question: str, history: list = None, current_user_id: st
             if attributed:
                 person_name = target_person
                 matched = attributed
+                team_ranking = True
 
-    if extremum == "least":
+    # Keep the full team ranking so team-level superlative answers can show every
+    # contributor's total, not just the winner's entries.
+    ranking = []
+    if team_ranking:
+        ranking = sorted(per_person.items(), key=lambda pair: pair[1]["minutes"],
+                         reverse=(extremum == "most"))
+
+    # The per-entry extremum filter must only apply when a person was explicitly named
+    # ("Anil's highest logged entry"); after team-level ranking the winner is already
+    # chosen by TOTAL minutes, so filtering per entry would discard their total.
+    if extremum == "least" and not team_ranking:
         target_val = min(item["minutes"] for item in matched)
         matched = [item for item in matched if item["minutes"] == target_val]
-    elif extremum == "most":
+    elif extremum == "most" and not team_ranking:
         target_val = max(item["minutes"] for item in matched)
         matched = [item for item in matched if item["minutes"] == target_val]
 
@@ -2634,7 +2800,7 @@ def _logged_time_answer(question: str, history: list = None, current_user_id: st
         matched_as_task and
         not any(_norm(requested_project) in _norm(item.get("project", "")) for item in matched)
     ) else "project"
-    date_suffix = f" on {target_date_str}" if target_date else ""
+    date_suffix = f" on {target_date_str}" if target_date_str else ""
     if person_name and requested_project:
         heading = f"{qualifier} {entry_noun} for {person_name} in {scope_kind} {requested_project}{date_suffix}:"
     elif person_name:
@@ -2674,6 +2840,17 @@ def _logged_time_answer(question: str, history: list = None, current_user_id: st
             lines.append("")
         if len(groups) > 1:
             lines.append("")
+
+    if team_ranking and len(ranking) > 1 and is_admin:
+        word = "highest" if extremum == "most" else "lowest"
+        lines.append(f"Ranking ({word} logged time first, {len(ranking)} contributors):")
+        for name, bucket in ranking[:8]:
+            marker = " ←" if name == person_name else ""
+            lines.append(f"  {name} — {_format_duration(bucket['minutes'])} "
+                         f"({bucket['entries']} {'entry' if bucket['entries'] == 1 else 'entries'}){marker}")
+        if len(ranking) > 8:
+            lines.append(f"  … and {len(ranking) - 8} more contributors.")
+        lines.append("")
 
     records = []
     record_text = {}

@@ -1752,6 +1752,52 @@ class LoggedTimeTests(MongoCase):
         planner.assert_not_called()
         generate.assert_not_called()
 
+    def test_most_logged_time_for_specific_month_returns_the_highest_entry(self):
+        shubham, frontend = self._superlative_fixture()
+        result, search, planner, generate = self.ask("What is Shubham's most logged time in January?")
+
+        self.assertEqual(result["mode"], "structured")
+        self.assertEqual(result["total_matching"], 1)
+        self.assertIn("Shubham", result["answer"])
+        self.assertIn("Highest logged-time", result["answer"])
+        self.assertIn("8h 0m", result["answer"])
+        self.assertIn("Task B", result["answer"])
+        self.assertNotIn("Task C", result["answer"])
+        self.assertNotIn("Total:", result["answer"])
+        search.assert_not_called()
+        planner.assert_not_called()
+        generate.assert_not_called()
+
+    def test_least_logged_time_for_specific_month_returns_the_lowest_entry(self):
+        shubham, frontend = self._superlative_fixture()
+        result, search, planner, generate = self.ask("What is Shubham's least logged time in January?")
+
+        self.assertEqual(result["mode"], "structured")
+        self.assertEqual(result["total_matching"], 1)
+        self.assertIn("Shubham", result["answer"])
+        self.assertIn("Least logged-time", result["answer"])
+        self.assertIn("1h 0m", result["answer"])
+        self.assertIn("Task C", result["answer"])
+        self.assertNotIn("Task B", result["answer"])
+        self.assertNotIn("Total:", result["answer"])
+        search.assert_not_called()
+        planner.assert_not_called()
+        generate.assert_not_called()
+
+    def test_team_superlative_for_specific_month_ranks_across_all_cards(self):
+        shubham, frontend = self._superlative_fixture()
+        other = ObjectId()
+        self.db["users"].insert_one({"_id": other, "name": "Rohan Mehta", "role": "employee", "jobTitle": "backend developer", "email": "rohan@example.com"})
+        self.db["cards"].insert_one({"title": "Task D", "board": frontend, "status": "todo", "loggedTime": [{"user": other, "hours": 40, "minutes": 0, "date": "2026-01-05", "description": "did stuff"}]})
+        result, search, planner, generate = self.ask("Who has the most logged time in January?")
+
+        self.assertEqual(result["mode"], "structured")
+        self.assertIn("Rohan Mehta", result["answer"])
+        self.assertIn("Highest logged-time", result["answer"])
+        self.assertIn("40h 0m", result["answer"])
+        self.assertNotIn("Total:", result["answer"])
+        search.assert_not_called()
+
     def test_team_superlative_least_logged_time_names_the_least_contributor(self):
         shubham, frontend = self._superlative_fixture()
         other = ObjectId()
@@ -1765,13 +1811,12 @@ class LoggedTimeTests(MongoCase):
         self.assertEqual(result["mode"], "structured")
         self.assertIn("Shubham", result["answer"])
         self.assertIn("Least logged-time", result["answer"])
-        self.assertNotIn("Rohan Mehta", result["answer"])
-        self.assertNotIn("Total:", result["answer"])
-        search.assert_not_called()
-        self.assertEqual(result["mode"], "structured")
-        self.assertIn("Shubham", result["answer"])
-        self.assertIn("Least logged-time", result["answer"])
-        self.assertNotIn("Rohan Mehta", result["answer"])
+        # Admin answers include the team ranking; the winner must still be ranked first.
+        ranking = result["answer"].split("Ranking", 1)
+        if len(ranking) == 2:
+            self.assertLess(ranking[1].find("Shubham"), ranking[1].find("Rohan Mehta"))
+        else:
+            self.assertNotIn("Rohan Mehta", result["answer"])
         self.assertNotIn("Total:", result["answer"])
         search.assert_not_called()
 
@@ -2042,7 +2087,13 @@ class LoggedTimeTests(MongoCase):
         r_less, search, _, _ = self.ask("who has less logged time in new test")
         self.assertEqual(r_less["mode"], "structured")
         self.assertIn("Aisha Khan", r_less["answer"])
-        self.assertNotIn("Rohan Mehta", r_less["answer"])
+        # Winner must still be Aisha; the ranking (admin) lists her first, or
+        # without a ranking Rohan must not appear at all.
+        ranking = r_less["answer"].split("Ranking", 1)
+        if len(ranking) == 2:
+            self.assertLess(ranking[1].find("Aisha Khan"), ranking[1].find("Rohan Mehta"))
+        else:
+            self.assertNotIn("Rohan Mehta", r_less["answer"])
         self.assertNotIn("No logged-time entries were found for 'less'", r_less["answer"])
         search.assert_not_called()
 
@@ -2055,7 +2106,13 @@ class LoggedTimeTests(MongoCase):
         r_most, search, _, _ = self.ask("who has most logged time in new test task")
         self.assertEqual(r_most["mode"], "structured")
         self.assertIn("Rohan Mehta", r_most["answer"])
-        self.assertNotIn("Aisha Khan", r_most["answer"])
+        # Winner must still be Rohan; the ranking (admin) lists him first, or
+        # without a ranking Aisha must not appear at all.
+        ranking = r_most["answer"].split("Ranking", 1)
+        if len(ranking) == 2:
+            self.assertLess(ranking[1].find("Rohan Mehta"), ranking[1].find("Aisha Khan"))
+        else:
+            self.assertNotIn("Aisha Khan", r_most["answer"])
         self.assertNotIn("No logged-time entries were found for 'ha'", r_most["answer"])
         search.assert_not_called()
 

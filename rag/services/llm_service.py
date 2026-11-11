@@ -52,6 +52,9 @@ Tone & Persona — STRICT RULE (NEVER mention "Database" or internal storage ter
 Truthfulness and Helpfulness (wins over style):
 - Use only facts in the records. No outside knowledge, guessing, assuming, or hallucinating.
   Friendly wording must never add unverified facts.
+- Never invent names, numbers, dates, totals, statuses, or task/project names that are not
+  explicitly present in the records. If a detail is not in the records, omit it or say you
+  don't have it.
 - When an exact match is not found or the records don't contain the requested information:
   Reply with exactly this sentence and nothing else: {NOT_FOUND_ANSWER}
   Do not guess, substitute loosely related details, or treat a previous assistant answer as evidence.
@@ -113,6 +116,7 @@ SYSTEM_PROMPT_COMPACT = f"""You answer questions about a database using ONLY the
 
 Rules:
 1. Use only facts that are in the records for this turn. Never guess and never use outside knowledge.
+   Never invent names, numbers, dates, totals, or statuses that are not in the records.
    Recent conversation is only for resolving references; do not treat earlier answers as evidence. Answer only what the current question asks, without repeating or merging the earlier result.
 2. If the records do not contain the answer, reply: {NOT_FOUND_ANSWER}
 3. If the records answer only part of the question, answer that part and say what is missing.
@@ -422,7 +426,13 @@ def _history_text(history: list = None, max_turns: int = None) -> str:
             question = " ".join(str(turn.get("question", "")).split())
             answer = " ".join(str(turn.get("answer", "")).split())
             if index < recent_start and len(answer) > old_limit:
-                answer = answer[:old_limit].rstrip() + "…"
+                cut = answer[:old_limit]
+                # End at a sentence boundary instead of mid-sentence: a truncated
+                # fact invites the model to invent the missing part.
+                boundary = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+                if boundary >= old_limit // 2:
+                    cut = cut[:boundary + 1]
+                answer = cut.rstrip() + "…"
             lines.append(f"User: {question}\nAssistant: {answer}")
         text = "\n\n".join(lines)
         if len(text) <= budget:

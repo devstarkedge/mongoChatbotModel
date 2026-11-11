@@ -257,22 +257,3 @@ class IngestView(APIView):
             return _error_response(exc)
 
 
-# """Versioned Django REST Framework API for chatbot integrations."""
-# import hmac
-
-# from django.conf import settings
-# from rest_framework import status
-# from rest_framework.permissions import AllowAny
-# from rest_framework.response import Response
-# from rest_framework.views import APIView
-
-# from . import api_serializers
-# from .services import chat_memory, ingestion_service, rag_service
-# from .services.anonymous_session import get_chat_owner
-# from .services.exceptions import AuthError, ChatbotError
-
-
-# def _error_response(exc):
-#     if isinstance(exc, ChatbotError):
-#         return Response({"error": exc.message}, status=exc.status_code)
-#     raise exc

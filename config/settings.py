@@ -94,7 +94,9 @@ CORS_ALLOWED_ORIGINS = _list(
 )
 CORS_ALLOW_CREDENTIALS = True
 CORS_URLS_REGEX = r"^.*$"
-CORS_ALLOW_ALL_ORIGINS = _bool("CORS_ALLOW_ALL_ORIGINS", True)
+# Secure default: only allow origins from CORS_ALLOWED_ORIGINS / CORS_ALLOWED_ORIGIN_REGEXES.
+# Set CORS_ALLOW_ALL_ORIGINS=true only for quick local experiments (never in production).
+CORS_ALLOW_ALL_ORIGINS = _bool("CORS_ALLOW_ALL_ORIGINS", False)
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^https:\/\/.*\.onrender\.com$",
     r"^http:\/\/localhost:\d+$",

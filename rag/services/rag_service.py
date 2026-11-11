@@ -286,7 +286,7 @@ def build_context(main_groups: list, related_groups: list, budget: int = None,
     label_of = {}
 
     def add(label, group, note=""):
-        nonlocal used
+        nonlocal used, truncated_first
         text = "\n...\n".join(_strip_html(h.text) for h in group)
         if not include_logged_time:
             text = _without_logged_time_text(text)
@@ -297,12 +297,20 @@ def build_context(main_groups: list, related_groups: list, budget: int = None,
         if len(prefix) + len(text) > remaining:
             if blocks:
                 return False
-            text = text[:remaining - len(prefix)].rstrip()
+            cut = text[:remaining - len(prefix)]
+            # Never cut a record mid-line: fall back to the last complete line.
+            newline = cut.rfind("\n")
+            if newline > 0:
+                cut = cut[:newline]
+            text = cut.rstrip()
+            truncated_first = True
         block = prefix + text
         blocks.append(block)
         used += len(block) + 2
         return True
 
+    total_groups = len(main_groups) + len(related_groups)
+    truncated_first = False
     for number, group in enumerate(main_groups, 1):
         if add(str(number), group):
             main_done.append(group)
@@ -313,7 +321,45 @@ def build_context(main_groups: list, related_groups: list, budget: int = None,
         note = f" (linked from record {origin} via '{via.get('field')}')" if origin else ""
         if add(f"R{number}", group, note):
             related_done.append(group)
-    return "\n\n".join(blocks), main_done, related_done
+    context_text = "\n\n".join(blocks)
+    dropped = total_groups - len(main_done) - len(related_done)
+    if dropped > 0 or truncated_first:
+        # Tell the model explicitly what it cannot see, so it never presents a
+        # partial view as complete (a major hallucination source).
+        shown = len(main_done) + len(related_done)
+        context_text += (
+            f"\n\nNote: only {shown} of the {total_groups} retrieved records fit in this context"
+            + (" and the last shown record was cut off." if truncated_first else ".")
+            + " The remaining records were NOT shown. Answer only from the records above; "
+            "if the question asks for all/every item, say the list may not be complete."
+        )
+    return context_text, main_done, related_done
+
+
+_REFUSAL_START = re.compile(
+    r"^(?:i (?:couldn'?t|can'?t|could not|cannot|was unable to|am unable to) find"
+    r"|no (?:matching )?(?:records|entries|results|data|information|details)"
+    r"|i don'?t have (?:any )?(?:information|data|records|details)"
+    r"|i (?:do not|don'?t) see any|not found|nothing (?:found|matches)"
+    r"|the records don'?t (?:contain|show|include))",
+    re.IGNORECASE,
+)
+
+
+def _is_refusal(answer: str) -> bool:
+    """True when the answer is a not-found refusal, even when the model paraphrases it.
+
+    The LLM is instructed to reply with the exact NOT_FOUND sentence, but it sometimes
+    paraphrases; an undetected refusal would otherwise get sources attached and look
+    like a verified partial answer.
+    """
+    text = " ".join(str(answer or "").split())
+    if not text:
+        return False
+    head = text[:200]
+    if head.lower().startswith(NOT_FOUND_ANSWER.lower().rstrip(".")):
+        return True
+    return bool(_REFUSAL_START.match(head))
 
 
 def _source(group, related=False) -> dict:
@@ -329,16 +375,31 @@ def _source(group, related=False) -> dict:
 SOURCE_CAP = 25
 
 
+_REFERENCE_PATTERN = re.compile(
+    r"\b(?:and|also|it|its|their|them|those|these|his|her|him|he|she|which ones?|what about|"
+    r"who else|sort|sorted|group|grouped|grouping|breakdown|filter|more|that|this)\b",
+    re.IGNORECASE,
+)
+
+
 def _retrieval_query(question: str, history: list) -> str:
-    """Use recent prior questions as a narrow anchor for elliptical follow-ups, never prior answers."""
+    """Use a recent prior question as a narrow anchor for elliptical follow-ups, never prior answers.
+
+    Blending several prior questions into the embedding query causes retrieval drift: the
+    earlier topics dominate the vector and the current question retrieves the wrong records,
+    which the LLM then weaves into an answer. So history is only included for genuinely
+    elliptical questions (pronouns/references, or very short follow-ups), and only the
+    immediately preceding question is used.
+    """
     if not history:
         return question
-    # A few prior questions resolve pronouns such as "which ones?" or "give me all"
-    # even when the referenced topic appeared a turn or two earlier. The current
-    # wording is kept last and clearly separate to limit retrieval drift.
-    prior_questions = [turn["question"] for turn in history[-3:]]
-    context = " | ".join(" ".join(item.split()) for item in prior_questions if item)
-    return f"Follow-up context: {context}\nCurrent question (focus retrieval on this): {question}"[-2000:]
+    words = question.split()
+    if len(words) > 6 and not _REFERENCE_PATTERN.search(question):
+        return question
+    prior = " ".join(str(history[-1].get("question", "")).split())
+    if not prior:
+        return question
+    return f"Follow-up context: {prior}\nCurrent question (focus retrieval on this): {question}"[-2000:]
 
 
 def _prior_list_reference(question: str, history: list) -> str | None:
@@ -580,7 +641,7 @@ def _exact_answer(question: str, exact, history=None) -> dict:
             answer, degraded = _plain_answer(exact), True
     answer = _strip_blank_bullet_lines(_sanitize_ids(answer))
     timings["llm"] = round((time.perf_counter() - mark) * 1000)
-    not_found = not degraded and answer.lower().startswith(NOT_FOUND_ANSWER.lower().rstrip("."))
+    not_found = not degraded and _is_refusal(answer)
     visible_records = _unique_records(exact.records)
     sources = [] if not_found else [
         {"collection": exact.collection, "document_id": r["document_id"], "name": r["name"],
@@ -826,8 +887,7 @@ def ask(
     mark("llm")
 
     is_pure_refusal = (
-        len(answer.strip()) < 90 and
-        answer.lower().startswith(NOT_FOUND_ANSWER.lower().rstrip("."))
+        len(answer.strip()) < 200 and _is_refusal(answer)
     )
     sources = [] if is_pure_refusal else (
         [_source(g) for g in main_done] + [_source(g, related=True) for g in related_done])
