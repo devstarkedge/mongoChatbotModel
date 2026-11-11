@@ -1506,7 +1506,7 @@ _LEAVE_TYPE_PATTERN = re.compile(
 )
 _LEAVE_TYPES_PATTERN = re.compile(
     r"\b(?:types?\s+of\s+leaves?|leaves?\s+types?|leave\s+types?|leaves?\s+categories?|leave\s+categories?|"
-    r"what\s+(?:leave|leaves)|which\s+(?:leave|leaves)|how\s+many\s+(?:types?\s+of\s+)?leaves?)\b",
+    r"what\s+(?:leave|leaves)(?!\s+did)|which\s+(?:leave|leaves)(?!\s+did)|how\s+many\s+types?\s+of\s+leaves?)\b",
     re.IGNORECASE,
 )
 _LEAVE_TIME_QUESTION_PATTERN = re.compile(
@@ -1540,6 +1540,30 @@ _MONTH_MAP = {
     "aug": 8, "august": 8, "sep": 9, "september": 9, "oct": 10, "october": 10,
     "nov": 11, "november": 11, "dec": 12, "december": 12,
 }
+
+# Bare leave-history questions that never mention hours/timesheet wording:
+# "leaves of mohit in sep", "mohit's leaves in september", "how many leaves did
+# mohit take in august", "leaves taken by rohit". Without this they fall through
+# to similarity search and the LLM, which answers them unreliably.
+_LEAVE_HISTORY_PATTERN = re.compile(
+    r"(?:"
+    r"\bleaves?\s+(?:of|for|by)\b"
+    r"|\bleaves?\s+(?:taken|take)\s+by\b"
+    r"|\b(?:how\s+many|number\s+of)\s+leaves?\b"
+    r"|\bdid\s+[A-Za-z][A-Za-z'-]*\s+take\s+(?:any\s+|a\s+)?leaves?\b"
+    r"|\b[A-Za-z][A-Za-z'-]*['’]s\s+leaves?\b"
+    r"|\b[A-Za-z][A-Za-z'-]+\s+leaves?\s+(?:in|during|for)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+# Words that never belong to a person's name when extracting one from a
+# leave-history question ("leaves of mohit in sep" -> "mohit").
+_LEAVE_NAME_STOPS = {
+    "leave", "leaves", "in", "on", "during", "this", "last", "the", "a", "an", "and",
+    "did", "do", "does", "take", "took", "has", "have", "had", "get", "got",
+    "month", "year", "week", "today", "yesterday",
+} | set(_MONTH_MAP)
 
 _THIS_PERIOD_PATTERN = re.compile(r"\bthis\s+(week|month|year|quarter|semester|half[\s-]?year|halfyear)\b", re.IGNORECASE)
 _BARE_YEAR_PATTERN = re.compile(r"\b(\d{4})\b", re.IGNORECASE)
@@ -1936,6 +1960,34 @@ def _leave_board_ids(db) -> set:
     return ids
 
 
+def _leave_person_candidate(text: str) -> str | None:
+    """Person for bare leave-history questions ("leaves of mohit in sep", "mohit's leaves").
+
+    Unlike _logged_time_person_candidate (which anchors on "logged time" wording), the
+    capture here runs to the end of the sentence, so period words are stripped and the
+    candidate is validated against the users collection with progressive trimming.
+    """
+    patterns = (
+        r"\bleaves?\s+(?:of|for|by|taken\s+by|take\s+by)\s+((?:[A-Za-z][A-Za-z'-]+\s+){0,2}[A-Za-z][A-Za-z'-]+)",
+        r"\b((?:[A-Za-z][A-Za-z'-]+\s+){0,2}[A-Za-z][A-Za-z'-]+)['’]s\s+leaves?\b",
+        r"\bleaves?\s+did\s+((?:[A-Za-z][A-Za-z'-]+\s+){0,2}[A-Za-z][A-Za-z'-]+)\s+take\b",
+        r"\bdid\s+((?:[A-Za-z][A-Za-z'-]+\s+){0,2}[A-Za-z][A-Za-z'-]+)\s+take\s+(?:any\s+|a\s+)?leaves?\b",
+        r"\b((?:[A-Za-z][A-Za-z'-]+\s+){0,2}[A-Za-z][A-Za-z'-]+)\s+leaves?\s+(?:in|during|for)\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if not match:
+            continue
+        words = [word for word in re.findall(r"[A-Za-z][A-Za-z'-]*", match.group(1))
+                 if word.lower() not in _LEAVE_NAME_STOPS]
+        while words:
+            candidate = " ".join(words)
+            if _ids_by_name("users", candidate):
+                return candidate
+            words.pop()      # drop the trailing word: "mohit in sep" -> "mohit"
+    return None
+
+
 def _leave_time_answer(question: str, history: list = None, current_user_id: str = None,
                        is_admin: bool = False):
     """Logged-time answer for leave tasks (Full Leave / Short Leave / Halfday Leave)
@@ -1947,7 +1999,8 @@ def _leave_time_answer(question: str, history: list = None, current_user_id: str
     """
     text = " ".join((question or "").split())
     is_superlative = bool(_LEAVE_COUNT_SUPERLATIVE_PATTERN.search(text))
-    if not is_superlative and not _LEAVE_TIME_QUESTION_PATTERN.search(text):
+    if not is_superlative and not _LEAVE_TIME_QUESTION_PATTERN.search(text) \
+            and not _LEAVE_HISTORY_PATTERN.search(text):
         return None
     if not (_LEAVE_TYPE_PATTERN.search(text) or re.search(r"\bleaves?\b", text, re.IGNORECASE)):
         return None
@@ -1956,7 +2009,8 @@ def _leave_time_answer(question: str, history: list = None, current_user_id: str
     # When no specific leave type is named, match any card with "leave" in the title.
     title_pattern = re.compile(re.escape(leave_type), re.IGNORECASE) if leave_type else re.compile(r"leave", re.IGNORECASE)
     personal = bool(current_user_id and re.search(r"\b(?:my|mine|myself)\b", text, re.IGNORECASE))
-    requested_person = None if personal else _logged_time_person_candidate(text)
+    requested_person = None if personal else (_leave_person_candidate(text)
+                                              or _logged_time_person_candidate(text))
     target_date = _extract_date_from_question(text)
     # Month/year/week scoping ("who has highest leaves in august month"): like
     # _logged_time_answer, use the period range so month-only questions do not

@@ -787,7 +787,8 @@ def ask(
     # Also routes superlative leave-count queries ("who takes most leaves").
     if not scope.user_id.startswith("guest:"):
         if (structured_query._LEAVE_TIME_QUESTION_PATTERN.search(query_text)
-                or structured_query._LEAVE_COUNT_SUPERLATIVE_PATTERN.search(query_text)) and \
+                or structured_query._LEAVE_COUNT_SUPERLATIVE_PATTERN.search(query_text)
+                or structured_query._LEAVE_HISTORY_PATTERN.search(query_text)) and \
                 (structured_query._LEAVE_TYPE_PATTERN.search(query_text)
                  or re.search(r"\bleaves?\b", query_text, re.IGNORECASE)):
             leave_time_exact = structured_query.try_structured(
