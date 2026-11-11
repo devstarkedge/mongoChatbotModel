@@ -682,7 +682,14 @@ class AskTests(MongoCase):
         with patch.object(llm_service, "generate", return_value=llm_service.NOT_FOUND_ANSWER):
             self.assertEqual(rag_service.ask("What is the CEO's phone number?")["sources"], [])
 
+    def _enable_answer_cache(self):
+        """Cache tests must pass regardless of the CACHE_TTL_SECONDS default (0 = disabled)."""
+        cache = rag_service._answer_cache
+        self.addCleanup(setattr, cache, "ttl", cache.ttl)
+        cache.ttl = 600
+
     def test_answers_are_cached_until_the_index_changes(self):
+        self._enable_answer_cache()
         with patch.object(llm_service, "generate", return_value="ok") as gen:
             rag_service.ask("Which projects are completed?")
             second = rag_service.ask("which   projects are COMPLETED?")
@@ -694,6 +701,7 @@ class AskTests(MongoCase):
             self.assertEqual(gen.call_count, 2)
 
     def test_repeated_question_in_same_chat_uses_cached_answer(self):
+        self._enable_answer_cache()
         session_id = "ca11e1234abc"
         self.addCleanup(rag_service.chat_memory.clear, session_id)
         with patch.object(llm_service, "generate", return_value="ShopEase is in progress.") as gen, \
@@ -721,6 +729,7 @@ class AskTests(MongoCase):
 
     @override_settings(STRUCTURED_QUERIES=True)
     def test_structured_answers_are_cached_for_repeated_questions(self):
+        self._enable_answer_cache()
         exact = structured_query.ExactResult(
             collection="projects", total=1,
             records=[{"document_id": "project-1", "name": "ShopEase", "text": "ShopEase"}],
