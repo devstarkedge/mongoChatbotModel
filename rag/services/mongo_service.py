@@ -65,9 +65,10 @@ def get_db():
 
 
 def get_embeddings_collection():
-    """The collection where embeddings + text + metadata + relationships are stored."""
-    db_name = (settings.EMBEDDINGS_DATABASE or "").strip() or _require("MONGO_DATABASE")
-    return _get_client()[db_name][settings.EMBEDDINGS_COLLECTION]
+    """Legacy helper: collection where fallback embeddings or test embeddings are stored."""
+    db_name = (getattr(settings, "EMBEDDINGS_DATABASE", "") or "").strip() or _require("MONGO_DATABASE")
+    coll_name = getattr(settings, "EMBEDDINGS_COLLECTION", "rag_embeddings")
+    return _get_client()[db_name][coll_name]
 
 
 def ping() -> bool:
@@ -86,8 +87,8 @@ def list_collections() -> list:
         raise MongoServiceError() from exc
     skip = {name.strip().lower() for name in settings.EXCLUDE_COLLECTIONS}
     skip |= blocked_collections()
-    if not (settings.EMBEDDINGS_DATABASE or "").strip():
-        skip.add(settings.EMBEDDINGS_COLLECTION.strip().lower())
+    # Do not accidentally ingest legacy embedding documents left by the previous backend.
+    skip.add("rag_embeddings")
     return sorted(n for n in names if not n.startswith("system.") and n.lower() not in skip)
 
 

@@ -15,18 +15,52 @@ from urllib.parse import urlparse
 
 from django.conf import settings
 
-from . import (cache_service, embedding_service, embedding_store, llm_service, retrieval,
+from . import (action_guard, cache_service, embedding_service, embedding_store, llm_service, retrieval,
                chat_memory, structured_query, vector_index, query_correction, authorization_service)
 from .exceptions import AuthorizationError, ChatbotError, InvalidRequestError, LLMError
 from .llm_service import NOT_FOUND_ANSWER
-from .structured_query import _sanitize_ids
-from .document_converter import strip_html as _strip_html
+from .structured_query import _sanitize_ids, _HEX24_STANDALONE
+from .document_converter import strip_html as _strip_html, redact_sensitive_text
 from .document_converter import pick_display_name
 
 logger = logging.getLogger(__name__)
 
 MIN_QUESTION_CHARS, MAX_QUESTION_CHARS = 2, 500
 _answer_cache = cache_service.TTLCache(settings.CACHE_MAX_ENTRIES, settings.CACHE_TTL_SECONDS)
+
+
+def _needs_person(question: str) -> bool:
+    """Return True if the question looks for a person but none is mentioned."""
+    # Heuristic: contains words like "who", "whose", "person", "employee"
+    # but lacks a proper name (no capitalized token longer than 2 chars).
+    if re.search(r"\b(who|whose|person|employee|member)\b", question, re.IGNORECASE):
+        return not re.search(r"\b[A-Z][a-z]{2,}\b", question)
+    return False
+
+
+def _needs_date_or_period(question: str) -> bool:
+    """Return True if the question talks about a time frame but no date/period is present."""
+    if re.search(r"\b(last|past|next|upcoming|this month|this week|year|quarter)\b", question, re.IGNORECASE):
+        # Look for any concrete date pattern (YYYY-MM-DD, month name, etc.)
+        return not structured_query._EXTRACT_DATE_PATTERN.search(question)
+    return False
+
+
+def _clarify_response(question: str) -> dict:
+    """Build a minimal "clarify" payload."""
+    missing = []
+    if _needs_person(question):
+        missing.append("person")
+    if _needs_date_or_period(question):
+        missing.append("date/period")
+    # Workspace is already forced by the API; no need to ask here.
+    return {
+        "question": question,
+        "answer": f"⚠️ I need a clearer question – could you specify the {' and '.join(missing)}?",
+        "sources": [],
+        "cached": False,
+        "clarify": True,  # custom flag for the frontend
+    }
 
 
 # Questions that expect SEVERAL answers. They automatically retrieve more records (LIST_TOP_K).
@@ -80,7 +114,7 @@ CAPABILITIES_WORDS = {
 
 
 SELF_IDENTITY_PATTERNS = re.compile(
-    r"\b(?:who\s+am\s+i|what\s+is\s+my\s+name|what\s+am\s+i\s+called|"
+    r"\b(?:who\s+(?:am\s+i|i\s+am)|what\s+is\s+my\s+name|what\s+am\s+i\s+called|"
     r"my\s+name\s+is|tell\s+me\s+my\s+name|identify\s+me|tell\s+me\s+about\s+myself|"
     r"my\s+profile|my\s+account|my\s+details|my\s+information|"
     r"what\s+is\s+my\s+email|my\s+email\s+address|tell\s+me\s+my\s+email|"
@@ -94,13 +128,20 @@ _NAME_WORDS = re.compile(r"\bname\b", re.IGNORECASE)
 _EMAIL_WORDS = re.compile(r"\bemail\b|\bemail\s+address\b", re.IGNORECASE)
 _ROLE_WORDS = re.compile(r"\brole\b|\badmin\b|\bemployee\b", re.IGNORECASE)
 
+SELF_IDENTITY_UNAVAILABLE = ("I can't confirm your identity from the account information available. "
+                             "Please sign in to your account and try again.")
+
 
 def check_self_identity(question: str, scope) -> str | None:
-    """Answer questions about the user's own identity (name, email, role) from the verified account."""
+    """Answer questions about the user's own identity (name, email, role) from the verified account.
+
+    This is a hard guard: the answer never comes from retrieved records and never uses the language
+    model. An unverified or guest account gets a safe message instead of a guess.
+    """
     if not SELF_IDENTITY_PATTERNS.search(question):
         return None
     if scope.user_id.startswith("guest:") or not scope.user_name:
-        return None
+        return SELF_IDENTITY_UNAVAILABLE
 
     asks_name = bool(_NAME_WORDS.search(question))
     asks_email = bool(_EMAIL_WORDS.search(question))
@@ -161,6 +202,8 @@ def _person_name_from_company_question(question: str) -> str | None:
 
 def check_company_identity(question: str, scope) -> str | None:
     """Answer 'what is my company' / 'my workspace' / '<person>'s company' questions from verified accounts."""
+    if not getattr(settings, "STRUCTURED_QUERIES", True):
+        return None
     if not COMPANY_IDENTITY_PATTERNS.search(question):
         return None
     if scope.user_id.startswith("guest:"):
@@ -174,6 +217,9 @@ def check_company_identity(question: str, scope) -> str | None:
             if scope.user_company:
                 return f"{person_name}'s company is {scope.user_company}."
             return f"{person_name} doesn't have a company/workspace recorded."
+        # Privacy: only admins may look up another member's company/workspace.
+        if not scope.is_admin:
+            return "You are not authorized to view other members' company details."
         try:
             from . import mongo_service
             db = mongo_service.get_db()
@@ -235,8 +281,8 @@ def check_conversational(question: str) -> str | None:
     if cleaned in GOODBYE_WORDS:
         return "Goodbye! Have a great day ahead. Feel free to come back whenever you need database insights."
     if cleaned in CAPABILITIES_WORDS:
-        return ("I am your MongoDB database assistant. You can ask me to list employees, "
-                "check assigned tasks, view departments, inspect projects, or count records.")
+        return ("I am your Chatbot. You can ask me to list employees, "
+                "check assigned tasks, view departments, inspect projects.")
     return None
 
 
@@ -278,6 +324,42 @@ def _without_logged_time_text(text: str) -> str:
     return "\n".join(line for line in text.splitlines() if not _LOGGED_TIME_LINE.match(line))
 
 
+def _clean_context_ids(text: str) -> str:
+    """Resolve user IDs to names in LLM context; redact raw user/document hex IDs so the LLM never sees them."""
+    if not isinstance(text, str) or not text:
+        return text
+    found_ids = list(set(_HEX24_STANDALONE.findall(text)))
+    if found_ids:
+        try:
+            from .mongo_service import get_db
+            from bson import ObjectId
+            db = get_db()
+            candidates = []
+            for sid in found_ids:
+                candidates.append(sid)
+                if len(sid) == 24:
+                    try:
+                        candidates.append(ObjectId(sid))
+                    except Exception:
+                        pass
+            users_map = {}
+            for u in db["users"].find({"_id": {"$in": candidates}}, {"name": 1, "fullName": 1, "firstName": 1, "lastName": 1, "username": 1}):
+                uid = str(u["_id"])
+                uname = u.get("name") or u.get("fullName") or " ".join(filter(None, [u.get("firstName"), u.get("lastName")])) or u.get("username")
+                if uname:
+                    users_map[uid] = uname
+            for uid, uname in users_map.items():
+                pattern = re.compile(rf'(?:(?:the\s+)?(?:user\s+(?:with\s+)?(?:ID|id|Id):?\s*)|(?:(?:ID|id|Id):?\s*))?{uid}\b', re.IGNORECASE)
+                text = pattern.sub(uname, text)
+        except Exception:
+            pass
+    # For common user relation lines like "Owner ID: <hex>", "Members ID: <hex>" where the user is unresolved:
+    text = re.sub(r'^(?:Owner|Members|Assignee|Assignees|Uploaded By|Created By)\s+IDs?:\s*[0-9a-fA-F]{24}\b', r'', text, flags=re.MULTILINE | re.IGNORECASE)
+    # Strip any remaining standalone hex IDs from context
+    text = _HEX24_STANDALONE.sub('', text)
+    return text
+
+
 def build_context(main_groups: list, related_groups: list, budget: int = None,
                   include_logged_time: bool = True):
     """Build the prompt context under a character budget. Returns (context, included_main, included_related)."""
@@ -287,7 +369,7 @@ def build_context(main_groups: list, related_groups: list, budget: int = None,
 
     def add(label, group, note=""):
         nonlocal used, truncated_first
-        text = "\n...\n".join(_strip_html(h.text) for h in group)
+        text = "\n...\n".join(_clean_context_ids(redact_sensitive_text(_strip_html(h.text))) for h in group)
         if not include_logged_time:
             text = _without_logged_time_text(text)
         prefix = f"[{label}]{note}\n"
@@ -372,6 +454,33 @@ def _source(group, related=False) -> dict:
     return source
 
 
+def _verify_sources(sources: list[dict], allowed_ids: set[str] | None) -> list[dict]:
+    """Keep only sources whose embedding ID is in allowed_ids."""
+    if allowed_ids is None:
+        return sources
+    filtered = [s for s in sources if s.get("document_id") in allowed_ids]
+    return filtered
+
+
+def _distinct_person_sources(sources: list[dict]) -> list[dict]:
+    """Deduplicate retrieved sources by (collection, document_id), preserving order."""
+    seen = set()
+    unique = []
+    for source in sources or []:
+        key = (str(source.get("collection") or ""), str(source.get("document_id") or source.get("name") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(source)
+    return unique
+
+
+def _person_disambiguation_answer(sources: list[dict]) -> str:
+    """Build a disambiguation answer when several people match a person query."""
+    lines = [f"- {s.get('name') or s.get('document_id') or 'Unknown'} (id: {s.get('document_id')})" for s in sources]
+    return "I found multiple people matching. Please specify which one you mean:\n" + "\n".join(lines)
+
+
 SOURCE_CAP = 25
 
 
@@ -396,35 +505,64 @@ def _retrieval_query(question: str, history: list) -> str:
     words = question.split()
     if len(words) > 6 and not _REFERENCE_PATTERN.search(question):
         return question
-    prior = " ".join(str(history[-1].get("question", "")).split())
+    prior_turn = history[-1]
+    prior = " ".join(str(prior_turn.get("question", "")).split())
     if not prior:
         return question
-    return f"Follow-up context: {prior}\nCurrent question (focus retrieval on this): {question}"[-2000:]
+    names = []
+    for source in prior_turn.get("sources", []):
+        name = " ".join(str(source.get("name") or "").split())
+        if name and name.casefold() not in {item.casefold() for item in names}:
+            names.append(name)
+    entity_context = f"\nSourced entities: {', '.join(names[:8])}" if names else ""
+    return (f"Follow-up context: {prior}{entity_context}\n"
+            f"Current question (focus retrieval on this): {question}")[-2000:]
 
 
-def _prior_list_reference(question: str, history: list) -> str | None:
-    """Resolve a direct ordinal question from the previous answer's displayed list."""
-    match = re.fullmatch(
+def _is_ordinal_followup(question: str) -> bool:
+    """Ordinals require a source-ordered list, which chat prose alone cannot guarantee."""
+    return bool(re.fullmatch(
         r"(?:what(?:'s| is| was)\s+(?:the\s+)?|which\s+(?:one\s+)?(?:was|is)\s+(?:the\s+)?|name\s+the\s+)"
         r"(first|second|third|last)(?:\s+(?:one|item|category|person|task|project))?[?.!]*",
         question.strip(), flags=re.IGNORECASE,
-    )
-    if not match or not history:
-        return None
+    ))
 
-    items = []
-    for line in history[-1]["answer"].splitlines():
-        item = re.match(r"\s*(?:[-*•]|\d+[.)])\s+(.+?)\s*$", line)
-        if item:
-            items.append(item.group(1))
-    if not items:
-        return None
 
-    ordinal = match.group(1).lower()
-    index = {"first": 0, "second": 1, "third": 2, "last": -1}[ordinal]
-    if index >= len(items):
-        return None
-    return items[index]
+def _has_ambiguous_person_reference(question: str, history: list) -> bool:
+    """Ask for a name when a person pronoun has zero or multiple sourced referents."""
+    if not history or not re.search(r"\b(?:he|him|his|she|her|hers|their)\b", question, re.IGNORECASE):
+        return False
+    if not re.search(r"\b(?:email|role|workspace|company|department|task|project|manager|name|work)\b",
+                     question, re.IGNORECASE):
+        return False
+    people = {
+        str(source.get("name") or "").strip().casefold()
+        for source in history[-1].get("sources", [])
+        if str(source.get("collection") or "").casefold() == "users" and source.get("name")
+    }
+    return len(people) != 1
+
+
+def _ground_history(history: list) -> list:
+    """Bound history and replace generated prose with names from persisted source metadata."""
+    grounded = []
+    for turn in (history or [])[-2:]:
+        entities = []
+        for source in turn.get("sources") or []:
+            name = " ".join(str(source.get("name") or "").split())
+            collection = " ".join(str(source.get("collection") or "").split())
+            if not name:
+                continue
+            label = f"{name} ({collection})" if collection else name
+            if label.casefold() not in {item.casefold() for item in entities}:
+                entities.append(label)
+        grounded.append({
+            "question": " ".join(str(turn.get("question", "")).split()),
+            # Never reuse the previous generated answer as evidence.
+            "answer": "Sourced entities: " + "; ".join(entities[:8]) if entities else "",
+            "sources": turn.get("sources") or [],
+        })
+    return grounded
 
 
 _EMPTY_BULLET_LINE = re.compile(
@@ -446,6 +584,8 @@ def _strip_blank_bullet_lines(text: str) -> str:
 
 
 def _remember(session_id, question, result, edit_index=None, user_id=None):
+    # This also protects chat history from answers cached before redaction was added.
+    result["answer"] = redact_sensitive_text(result.get("answer", ""))
     if session_id:
         if edit_index is None:
             chat_memory.add(session_id, question, result["answer"], owner_id=user_id)
@@ -639,7 +779,7 @@ def _exact_answer(question: str, exact, history=None) -> dict:
         except LLMError as exc:
             logger.warning("LLM unavailable for an exact result (%s); returning the plain result.", exc.message)
             answer, degraded = _plain_answer(exact), True
-    answer = _strip_blank_bullet_lines(_sanitize_ids(answer))
+    answer = redact_sensitive_text(_strip_blank_bullet_lines(_sanitize_ids(answer)))
     timings["llm"] = round((time.perf_counter() - mark) * 1000)
     not_found = not degraded and _is_refusal(answer)
     visible_records = _unique_records(exact.records)
@@ -662,11 +802,25 @@ def ask(
     user_id=None,
     email=None,
     history=None,
+    workspace_id=None,
+    resolved_scope=None,
 ) -> dict:
     question = validate_question(question)
     if session_id is not None and (not isinstance(session_id, str) or not re.fullmatch(r"[A-Fa-f0-9-]{1,64}", session_id)):
         raise InvalidRequestError("'session_id' must be a valid session identifier.")
-    scope = authorization_service.resolve_scope(user_id, email=email)
+    warning = action_guard.warning_for_request(question)
+    if warning:
+        return {
+            "question": question,
+            "answer": warning["message"],
+            "sources": [],
+            "cached": False,
+            "mode": "safety_warning",
+            "blocked": True,
+            "warning": warning,
+            "timings_ms": {"total": 0},
+        }
+    scope = resolved_scope or authorization_service.resolve_scope(user_id, email=email, workspace_id=workspace_id)
     chat_owner_id = scope.chat_owner_id
 
     # Self-identity questions are about the current account only, not another user's data,
@@ -684,6 +838,7 @@ def ask(
         _remember(session_id, question, result, edit_index, chat_owner_id)
         return result
 
+    # Company identity check – placed after the anti‑OSINT guard as recommended.
     company_identity = check_company_identity(question, scope)
     if company_identity is not None:
         result = {
@@ -719,6 +874,7 @@ def ask(
                 "Refresh the chat and edit a more recent turn."
             )
         history = history[:edit_index - history_offset]
+    history = _ground_history(history)
 
     conversational = check_conversational(question)
     if conversational is not None:
@@ -733,15 +889,27 @@ def ask(
         _remember(session_id, question, result, edit_index, chat_owner_id)
         return result
 
-    prior_item = _prior_list_reference(question, history)
-    if prior_item is not None:
-        ordinal = re.search(r"\b(first|second|third|last)\b", question, re.IGNORECASE).group(1).lower()
+    if history and _is_ordinal_followup(question):
         result = {
             "question": question,
-            "answer": f"The {ordinal} one listed was {prior_item}.",
+            "answer": "I can’t reliably identify that item from the earlier generated list. Please repeat the list or name the item you mean.",
             "sources": [],
             "cached": False,
-            "mode": "history_reference",
+            "mode": "clarify",
+            "clarify": True,
+            "timings_ms": {"total": 0},
+        }
+        _remember(session_id, question, result, edit_index, chat_owner_id)
+        return result
+
+    if _has_ambiguous_person_reference(question, history):
+        result = {
+            "question": question,
+            "answer": "Which person do you mean? Please give me their name so I can look up the right information.",
+            "sources": [],
+            "cached": False,
+            "mode": "clarify",
+            "clarify": True,
             "timings_ms": {"total": 0},
         }
         _remember(session_id, question, result, edit_index, chat_owner_id)
@@ -749,10 +917,35 @@ def ask(
 
     query_text = query_correction.normalize_query(question)
     query_text = query_correction.correct_query(strip_greeting(query_text))
+    query_text = structured_query.normalize_role_lookup_question(query_text)
     top_k = top_k or settings.TOP_K
     list_mode = bool(settings.LIST_TOP_K) and is_list_question(query_text)
     if list_mode:
         top_k = max(top_k, settings.LIST_TOP_K)     # never fewer than the user's mode, more for list questions
+
+    # Personal work queries are answered directly from MongoDB and are not answer-cached.
+    # Resolve them before checking Qdrant's remote revision marker, which is needed only
+    # to invalidate cached semantic RAG answers.
+    if not scope.user_id.startswith("guest:"):
+        personal_work = structured_query.try_current_user_work(
+            query_text, scope.user_id, history=history, user_name=scope.user_name,
+            workspace_id=scope.workspace_id, is_admin=scope.is_admin,
+        )
+        if personal_work is not None:
+            result = _exact_answer(question, personal_work, history)
+            _remember(session_id, question, result, edit_index, chat_owner_id)
+            return result
+
+    # This negated project-status query must bypass the general answer cache:
+    # older cached planner answers may include completed projects.
+    if scope.is_admin and settings.STRUCTURED_QUERIES and not collections:
+        uncompleted_projects = structured_query._uncompleted_projects_answer(
+            query_text, workspace_id=scope.workspace_id)
+        if uncompleted_projects is not None:
+            result = _exact_answer(question, uncompleted_projects, history)
+            _remember(session_id, question, result, edit_index, chat_owner_id)
+            return result
+
     cache_history = history
     normalized_question = question.casefold()
     # An immediate repeat should use the same context key as the original request.
@@ -769,16 +962,6 @@ def ask(
         _remember(session_id, question, result, edit_index, chat_owner_id)
         return result
 
-    # Personal work queries use the verified account ID directly, so "my tasks"
-    # does not depend on the name appearing in the question or on vector links.
-    if not scope.user_id.startswith("guest:"):
-        personal_work = structured_query.try_current_user_work(
-            query_text, scope.user_id, history=history
-        )
-        if personal_work is not None:
-            result = _exact_answer(question, personal_work, history)
-            _remember(session_id, question, result, edit_index, chat_owner_id)
-            return result
 
     # Leave-time questions (Full Leave / Short Leave / Halfday Leave logged time)
     # are read from nested loggedTime entries on leave task cards. Privacy is
@@ -788,7 +971,8 @@ def ask(
     if not scope.user_id.startswith("guest:"):
         if (structured_query._LEAVE_TIME_QUESTION_PATTERN.search(query_text)
                 or structured_query._LEAVE_COUNT_SUPERLATIVE_PATTERN.search(query_text)
-                or structured_query._LEAVE_HISTORY_PATTERN.search(query_text)) and \
+                or structured_query._LEAVE_HISTORY_PATTERN.search(query_text)
+                or re.search(r"\bwho\s+(?:is|was|are|were)\s+on\s+leave\b|\bis\s+.*?\s+on\s+leave\b|\bon\s+leave\b", query_text, re.IGNORECASE)) and \
                 (structured_query._LEAVE_TYPE_PATTERN.search(query_text)
                  or re.search(r"\bleaves?\b", query_text, re.IGNORECASE)):
             leave_time_exact = structured_query.try_structured(
@@ -796,6 +980,8 @@ def ask(
                 history=history,
                 current_user_id=scope.user_id,
                 is_admin=scope.is_admin,
+                restrict_unscoped=True,
+                workspace_id=scope.workspace_id,
             )
             if leave_time_exact is not None:
                 result = _exact_answer(question, leave_time_exact, history)
@@ -807,7 +993,11 @@ def ask(
     # this only reports which leave task types exist, not any user's data.
     if not scope.user_id.startswith("guest:"):
         if structured_query._LEAVE_TYPES_PATTERN.search(query_text):
-            leave_types_exact = structured_query.try_structured(query_text, history=history)
+            leave_types_exact = structured_query.try_structured(
+                query_text, history=history,
+                current_user_id=scope.user_id, is_admin=scope.is_admin,
+                restrict_unscoped=True,
+            )
             if leave_types_exact is not None:
                 result = _exact_answer(question, leave_types_exact, history)
                 _remember(session_id, question, result, edit_index, chat_owner_id)
@@ -820,12 +1010,16 @@ def ask(
         structured_query.is_logged_time_question(query_text)
         or structured_query.is_logged_time_followup(query_text, history)
     )
+    # Prevent guest users (non‑admin) from accessing any logged‑time data.
+    if logged_time_question and not scope.is_admin and scope.user_id.startswith("guest:"):
+        raise AuthorizationError("Guest users are not permitted to view logged‑time information.")
     if logged_time_question:
         exact = structured_query.try_structured(
             query_text,
             history=history,
             current_user_id=None if scope.user_id.startswith("guest:") else scope.user_id,
             is_admin=scope.is_admin,
+            restrict_unscoped=True,
         )
         if exact is not None:
             result = _exact_answer(question, exact, history)
@@ -834,7 +1028,7 @@ def ask(
 
     structured_candidate = (
         (settings.STRUCTURED_QUERIES or logged_time_question) and (not collections or logged_time_question)
-        and not _multi_topic_leave_question(query_text) and scope.embedding_ids is None
+        and not _multi_topic_leave_question(query_text) and (scope.embedding_ids is None or scope.is_admin)
         and (logged_time_question or (
             scope.is_admin
             and (list_mode or structured_query.mentions_collection(query_text)
@@ -844,7 +1038,12 @@ def ask(
     )
     cache_result = True
     if structured_candidate:
-        exact = structured_query.try_structured(query_text, history=history)
+        exact = structured_query.try_structured(
+            query_text, history=history,
+            current_user_id=scope.user_id, is_admin=scope.is_admin,
+            restrict_unscoped=True,
+            workspace_id=scope.workspace_id,
+        )
         if exact is not None:
             result = _exact_answer(question, exact, history)
             if exact.source != "name-match":
@@ -884,7 +1083,7 @@ def ask(
     )
     answer = llm_service.generate(question, context, max_tokens=settings.LIST_MAX_TOKENS if list_mode else None,
                                   history=history)
-    answer = _strip_blank_bullet_lines(answer)
+    answer = _sanitize_ids(redact_sensitive_text(_strip_blank_bullet_lines(answer)))
     mark("llm")
 
     is_pure_refusal = (
@@ -892,8 +1091,33 @@ def ask(
     )
     sources = [] if is_pure_refusal else (
         [_source(g) for g in main_done] + [_source(g, related=True) for g in related_done])
-    result = {"question": question, "answer": answer, "sources": sources, "cached": False,
-              "records_used": len(main_done), "list_mode": list_mode, "timings_ms": timings}
+    # ---- NEW: verify source IDs against scope ----
+    sources = _verify_sources(sources, scope.embedding_ids)
+    # ---------------------------------------------
+    if structured_query.is_person_lookup_question(query_text) and len(_distinct_person_sources(sources)) > 1:
+        result = {
+            "question": question,
+            "answer": _person_disambiguation_answer(_distinct_person_sources(sources)),
+            "sources": sources,
+            "cached": False,
+            "mode": "person_disambiguation",
+            "records_used": len(sources),
+            "list_mode": list_mode,
+            "timings_ms": timings,
+        }
+        if cache_result:
+            _answer_cache.set(cache_key, copy.deepcopy(result))
+        _remember(session_id, question, result, edit_index, chat_owner_id)
+        logger.info("ask: person query %r matched multiple records; returning disambiguation", question)
+        return result
+    result = {
+        "question": question,
+        "answer": answer,
+        "sources": sources,
+        "cached": False,
+        "records_used": len(main_done),
+        "list_mode": list_mode,
+        "timings_ms": timings,}
     if cache_result:
         _answer_cache.set(cache_key, copy.deepcopy(result))
     _remember(session_id, question, result, edit_index, chat_owner_id)
@@ -902,12 +1126,16 @@ def ask(
 
 
 def search(query, top_k=None, collections=None, hybrid=None, expand=False, hops=None, user_id=None,
-           email=None) -> dict:
+           email=None, workspace_id=None, resolved_scope=None) -> dict:
     """Semantic (and keyword) search without the LLM."""
     query = validate_question(query)
+    warning = action_guard.warning_for_request(query)
+    if warning:
+        return {"query": query, "results": [], "blocked": True, "warning": warning,
+                "timings_ms": {"total": 0}}
     search_query = query_correction.expand_query(query_correction.correct_query(query))
     started = time.perf_counter()
-    scope = authorization_service.resolve_scope(user_id, email=email)
+    scope = resolved_scope or authorization_service.resolve_scope(user_id, email=email, workspace_id=workspace_id)
     if not scope.is_admin and authorization_service.mentions_another_user(query, scope.user_id, scope.user_name):
         raise AuthorizationError("You are not authenticated , to access information")
     hits = retrieval.search(search_query, top_k=top_k, collections=collections, hybrid=hybrid,
@@ -939,6 +1167,10 @@ def health() -> dict:
 
 def warm_up():
     try:
+        embedding_store.ensure_indexes()
+    except Exception as exc:
+        logger.info("Qdrant index warm-up skipped: %s", exc)
+    try:
         query_correction.prepare_vocabulary()
     except Exception as exc:
         logger.info("Query spelling warm-up skipped: %s", exc)
@@ -946,7 +1178,10 @@ def warm_up():
         structured_query.build_catalog()      # first list question is then fast
     except Exception as exc:
         logger.info("Catalog warm-up skipped: %s", exc)
-    vector_index.get_index()
+    try:
+        vector_index.get_index()          # preloads the index; never builds one
+    except ChatbotError as exc:
+        logger.info("Vector index warm-up skipped: %s", exc.message)
     if settings.EMBEDDING_PROVIDER == "local":
         embedding_service.get_model()
     try:

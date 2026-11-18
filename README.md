@@ -1,415 +1,365 @@
-# Mongo RAG Pro: MongoDB, relationships, embeddings, hybrid search, LLM
+# Mongo RAG Pro: MongoDB, Relationships, Vector Search & Structured Intelligence
 
-Ask questions in plain language about **any** MongoDB database. The system converts documents of any schema to
-natural language, detects and resolves the ObjectId relationships between collections, stores embeddings in MongoDB,
-searches them (semantic + keyword), follows links between records, and lets an LLM (gpt-oss-20b, OpenAI, ...) answer
-from the retrieved records only.
+An enterprise-grade, retrieval-augmented intelligence system designed to answer plain-language questions across complex MongoDB schemas. The system converts raw documents into natural language, resolves relational references across collections without hardcoded schemas, embeds chunks into **Qdrant Vector DB**, performs hybrid semantic + keyword search with multi-hop graph expansion, executes deterministic structured queries for aggregate/list calculations, and synthesizes answers via LLMs (Google Gemini, OpenAI, Groq, Ollama) while enforcing strict role-based access control and data privacy.
 
-## 0. Run fully local with Ollama (gemma3:4b)
+---
 
-Nothing leaves your machine: MongoDB, the embedding model and the language model are all local.
+## 1. System Architecture
 
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                          INGESTION PIPELINE                            │
+│  python manage.py ingest  /  POST /api/v1/ingest/                      │
+├────────────────────────────────────────────────────────────────────────┤
+│  MongoDB Collections (Dynamic Discovery: users, boards, cards, etc.)   │
+│    │                                                                   │
+│    ├──► Relationship Resolver (Probes & caches foreign ObjectId links) │
+│    ├──► Universal Converter (Document -> Human text + Reference names) │
+│    ├──► Smart Chunking (Fits token budget, preserves line boundaries)  │
+│    ├──► Content Hash Check (Skips unchanged chunks -> incremental)     │
+│    ├──► Embeddings (FastEmbed / all-MiniLM-L6-v2 or OpenAI, normalized)│
+│    └──► Qdrant Vector Store (Point: vector + payload + relationships)  │
+│         └──► Automatic Payload Index Creation (Self-healing schema)    │
+└────────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────────────────┐
+│                           ASK / QUERY PIPELINE                         │
+│  POST /api/v1/ask/                                                     │
+├────────────────────────────────────────────────────────────────────────┤
+│  User Question + Authentication Context (user_id, email, workspace_id) │
+│    │                                                                   │
+│    ├──► 1. Conversational & Guardrail Check (Greetings, capabilities)  │
+│    │                                                                   │
+│    ├──► 2. Personal Work Routing (Direct lookup for current user tasks)│
+│    │                                                                   │
+│    ├──► 3. Canonical Leave Requests Engine                             │
+│    │      • Directly queries `leaverequests` + `leavetypes`            │
+│    │      • Reconciles requester -> users, leaveType -> leavetypes     │
+│    │      • Date filtering, approval status & superlative aggregates   │
+│    │      • Excludes administrative template "Leave" board & cards     │
+│    │                                                                   │
+│    ├──► 4. Structured Query Planner (Lists & exact counts)             │
+│    │      • Plans catalog query -> strictly validated JSON filter      │
+│    │      • Direct MongoDB `find` / `count_documents` execution        │
+│    │      • Enriches project records with exact linked members         │
+│    │                                                                   │
+│    ├──► 5. Hybrid Semantic Retrieval (When semantic search is needed)  │
+│    │      • Qdrant cosine vector search + keyword payload match        │
+│    │      • Reciprocal Rank Fusion (RRF) reranking                     │
+│    │      • Multi-Hop expansion (follows forward/reverse relationships)│
+│    │      • Context Sanitization (scrubs raw IDs, resolves user names) │
+│    │      • LLM Answer Generation (Gemini 3.5 / OpenAI / Ollama)       │
+│    │                                                                   │
+│    └──► 6. Dynamic ID Sanitization & Privacy Shield                    │
+│           • Resolves 24-hex ObjectIds against `users` collection       │
+│           • Replaces "user with ID <id>" with real team member names   │
+│           • Strips any dangling or non-user hex IDs completely         │
+│           • Sanitizes punctuation artifacts (empty commas, brackets)   │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 2. Core Capabilities & Intelligent Engines
+
+### A. Canonical Leave Management Engine
+- **Direct Collection Binding**: Employee leave records are queried directly from the **`leaverequests`** collection (joined with `users` for requester names and `leavetypes` for policy categories such as *Full Day Leave*, *Short Leave*, *Half Day Leave*).
+- **Template Board Separation**: Administrative template boards named `"Leave"` and their placeholder cards (`Short leave`, `Halfday Leave`, `Full leave`) are strictly isolated from operational projects and tasks.
+- **Natural Date & Status Parsing**:
+  - Specific day lookups (e.g. `who is on leave on 13 nov` -> filters approved leaves across `00:00:00` to `23:59:59.999999` boundaries).
+  - Status classification (`APPROVED`, `PENDING`, `REJECTED`, `CANCELLED_BY_REQUESTER`, `CANCELLED_BY_ADMIN`).
+  - Superlative aggregates (e.g. `who has least leaves in oct`, `who takes most leaves`).
+
+### B. Dynamic ID Sanitization & Privacy Shield
+- **Zero Raw ID Exposure**: Raw database ObjectIds (such as `68f0d3a8445a827910e3956d`) are never displayed to the frontend.
+- **Automated Name Resolution**: If a user ID appears in relationships or text, `_sanitize_ids` dynamically queries the `users` collection to resolve it to the user's full name (e.g., *"Rohit Gupta"*).
+- **Context Scrubbing**: Context fed into LLM prompts is cleaned via `_clean_context_ids`, ensuring the model never sees raw hex IDs for owners, assignees, or members.
+- **Clean Team Summaries**: Project members and assignees are filtered to valid user records, eliminating empty commas like `(, , Anil Bansal, ...)` and presenting only clean, human-readable name rosters.
+
+### C. Self-Healing Vector Store (Qdrant)
+- **Automatic Payload Indexing**: On startup, `embedding_store.ensure_indexes()` verifies and creates required Qdrant payload schema indexes (including integer index on `metadata.chunk_index`, keyword index on `metadata.workspace_id`, and `reference_ids`).
+- **Resilient Multi-Hop Expansion**: Reverse relationship lookups (`find_referencing_batch`) run inside non-fatal handlers, allowing multi-hop queries to fall back gracefully to primary search hits without aborting user chat turns.
+
+### D. Structured Query Planner
+- **Exact Counts & Deterministic Lists**: Queries such as *"list all pending projects"*, *"how many departments are there"*, or *"unique members on Web Chat Pingly"* are translated into strict MongoDB queries rather than approximate similarity retrieval.
+- **Strict Operator Whitelist**: Supported operations (`eq`, `ne`, `in`, `contains`, `gt`, `gte`, `lt`, `lte`) prevent prompt injections while ensuring 100% precision for counts and status filters.
+
+---
+
+## 3. Database Dependencies
+
+The system integrates two complementary data tiers:
+
+| Database | Technology | Primary Role in Chatbot |
+|---|---|---|
+| **Operational Store** | **MongoDB Atlas** | Single source of truth for business data: `users`, `boards` (projects), `cards` (tasks), `subtasks`, `leaverequests`, `leavetypes`, `workspaces`, `departments`. Powers exact lists, status checks, leave balances, logged time, and permission checks. |
+| **Vector Store** | **Qdrant (Cloud / Local)** | Semantic index storing dense vector embeddings and chunk payloads (`rag_chunks` collection). Powers conceptual similarity matching, unstructured search, hybrid keyword matching, and multi-hop relationship traversals. |
+
+---
+
+## 4. Quick Start
+
+### 1. Environment Setup
 ```powershell
-# 1. Install Ollama from https://ollama.com (Windows/macOS/Linux), then download the model once:
-ollama pull gemma3:4b
-ollama run gemma3:4b "say hi"          # quick check that it works; type /bye to exit
+# Create and activate virtual environment
+cd MONGO_CHATBOT
+py -3.12 -m venv venv
+.\venv\Scripts\Activate.ps1
 
-# 2. In this project
-copy .env.example .env                  # the default .env.example IS the local profile (LLM_PROVIDER=ollama)
-#    set MONGO_URI and MONGO_DATABASE in .env, nothing else is required (no API key)
+# Upgrade pip and install dependencies
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+### 2. Configure Environment (`.env`)
+Copy `.env.example` to `.env` and verify your settings:
+```ini
+# MongoDB
+MONGO_URI=mongodb+srv://<username>:<password>@cluster0.mongodb.net/?retryWrites=true&w=majority
+MONGO_DATABASE=flowtask
+MONGO_MAX_POOL_SIZE=10
+
+# Qdrant Vector DB
+QDRANT_URL=https://<your-cluster>.qdrant.io:6333
+QDRANT_API_KEY=<your-qdrant-api-key>
+QDRANT_COLLECTION=rag_chunks
+
+# LLM Provider (Google Gemini, OpenAI, or Ollama)
+LLM_PROVIDER=gemini
+GEMINI_API_KEY=<your-gemini-api-key>
+LLM_MODEL=gemini-3.5-flash-lite
+
+# Retrieval & Hybrid Settings
+STRUCTURED_QUERIES=true
+HYBRID_SEARCH=true
+TOP_K=6
+LIST_TOP_K=30
+MAX_HOPS=1
+```
+
+### 3. Run Ingestion & Server
+```powershell
+# Ingest data from MongoDB into Qdrant (creates points and schema indexes)
 python manage.py ingest
+
+# Start Django development server
 python manage.py runserver
 ```
 
-## Access
+---
 
-The chatbot and its data endpoints do not require a user account or password. Any visitor who can reach the
-service can search all indexed records, so deploy it only on a network where that access is appropriate.
-Chat history is kept in memory and associated with the browser's anonymous session.
+## 5. REST API Reference
 
-The top-right pill tells you if Ollama is not running ("Ollama is not running") or the model is missing ("Run: ollama pull gemma3:4b").
-The Index tab shows the model and whether Ollama is reachable. Use `.env.cloud.example` to go back to Groq/OpenAI.
+The REST API is versioned under `/api/v1/` and accepts standard JSON payloads.
 
-## REST API for React and other applications
+### Endpoints
 
-The chatbot API is implemented with Django REST Framework and is versioned under `/api/v1/`. Existing same-origin
-UI paths such as `/api/ask/` remain available. Chat and search endpoints are public and do not require an
-Authorization header. Never put the ingest token or MongoDB credentials in a browser application.
-
-### Chat and data endpoints
-
-| Method | Endpoint | Purpose |
+| Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/api/v1/ask/` | Search indexed records and generate a chatbot answer |
-| `POST` | `/api/v1/search/` | Return matching records without generating an answer |
-| `GET` | `/api/v1/chats/` | List this authenticated account's (or anonymous browser's) chat sessions |
-| `GET` | `/api/v1/chats/{session_id}/` | Read a chat's retained turns |
-| `POST` | `/api/v1/chats/{session_id}/rename/` | Rename a chat with `{"title": "..."}` |
-| `DELETE` | `/api/v1/chats/{session_id}/delete/` | Delete a chat (`POST` is also accepted) |
-| `GET` | `/api/v1/health/` | Public service, MongoDB, model, and index status |
-| `GET`, `POST` | `/api/v1/ingest/` | Read ingestion status or start ingestion; requires the server-side ingest token |
+| `POST` | `/api/v1/ask/` | Executes full RAG pipeline or structured query and returns natural language answer. |
+| `POST` | `/api/v1/search/` | Performs semantic + hybrid search over indexed records without LLM synthesis. |
+| `GET` | `/api/v1/chats/` | Lists chat sessions for the current authenticated user/session. |
+| `GET` | `/api/v1/chats/{session_id}/` | Retrieves chat history turns for a specific session. |
+| `POST` | `/api/v1/chats/{session_id}/rename/` | Updates session title. |
+| `DELETE` | `/api/v1/chats/{session_id}/delete/` | Deletes a chat session and clears its memory. |
+| `GET` | `/api/v1/health/` | Health check for MongoDB, Qdrant, embeddings, and LLM provider. |
+| `POST` | `/api/v1/ingest/` | Triggers background data ingestion (requires `INGEST_TOKEN`). |
 
-Ask body fields: `question` (required, 2–500 chars), `session_id` (optional UUID/string ID),
-`user_id` (optional MongoDB user ID), `email` and `role` (optional frontend identity fields),
-`top_k` (1–50), `hops` (0–3), `collections` (optional string array), and `edit_index` (optional non-negative turn index).
-When `user_id` is supplied, the API resolves the account and its permissions from MongoDB and checks `email`
-against that account. Employees (and non-admin accounts) can search only records linked to their user ID.
-Accounts whose MongoDB role is `admin` can search all records. The request's `role` is informational only and
-cannot grant admin access. Account-scoped requests must include the matching JWT bearer token, and the Django
-and frontend server must use the same `JWT_SECRET`. The frontend proxy uses the authenticated account identity,
-not any identity fields supplied by the browser. If an employee explicitly asks about another user's name, the
-API responds with `You are not authenticated , to access information`. Requests without `user_id` can use
-conversational chat but cannot retrieve indexed records.
-
+### Example: `/api/v1/ask/` Request
 ```json
 {
-  "question": "What tasks are assigned to me?",
-  "session_id": "a1b2c3d4-e5f6-4789-abcd-0123456789ab",
-  "user_id": "507f1f77bcf86cd799439011",
-  "email": "person@example.com",
-  "role": "employee",
+  "question": "who is on leave on 13 nov",
+  "session_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "user_id": "69ce2134b97c97fe612de9be",
+  "email": "employee@example.com",
+  "workspace_id": "6a759a7611d309503d9cee15",
   "top_k": 6,
   "hops": 1
 }
 ```
 
-An ask response includes `answer`, `sources`, `cached`, `timings_ms`, and (when applicable) fields such as
-`records_used`, `list_mode`, `mode`, `collection`, `total_matching`, and `degraded`.
-
-Search body fields: `query` (required, 2–500 chars), optional `user_id`, `email`, and `role`, `top_k`, `hops`,
-`collections`, `hybrid` (boolean), and `expand` (boolean). When an account ID is supplied, the matching JWT
-bearer token is required and the same employee/admin scopes apply. Anonymous searches return no indexed records.
-The response contains `results`, optional `related` records, and `timings_ms`.
-
-API validation errors use HTTP 400, inaccessible chats use 404, and service errors use their corresponding HTTP
-status and a JSON `error` field. Chat histories are held in memory, expire after an hour of inactivity, and retain
-the latest 10 turns.
-
-### React example
-
-```js
-const API = "https://chat.example.com/api/v1";
-const token = authToken; // JWT returned by your login flow
-const currentUser = authenticatedUser; // { id, email, role }
-
-const result = await fetch(`${API}/ask/`, {
-  method: "POST",
-  headers: {
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${token}`,
-  },
-  body: JSON.stringify({
-    question: "What tasks are assigned to me?",
-    session_id: crypto.randomUUID(),
-    user_id: currentUser.id,
-    email: currentUser.email,
-    role: currentUser.role,
-    top_k: 6,
-    hops: 1,
-  }),
-}).then(async (response) => {
-  const body = await response.json();
-  if (!response.ok) throw new Error(body.error || "Chat request failed");
-  return body;
-});
-```
-
-If a browser frontend is hosted on a different origin, set `DJANGO_CORS_ALLOWED_ORIGINS` to a comma-separated
-allowlist of its exact origins (for example, `https://app.example.com`). Server-to-server integrations do not need
-CORS.
-
-**How the local profile differs.** The code talks to Ollama's native API (`/api/chat`), because the OpenAI-compatible endpoint cannot set the
-context window and Ollama's default window would silently cut off long prompts. Each request sets `num_ctx` (`OLLAMA_NUM_CTX`, default 8192) and
-keeps the model loaded (`OLLAMA_KEEP_ALIVE`). The query planner uses Ollama's JSON mode, so even a 4B model returns valid JSON (the plan is still
-validated strictly). A shorter system prompt is used, and the defaults are smaller than for hosted models:
-`TOP_K=4`, `MAX_CONTEXT_CHARS=6000`, `LIST_TOP_K=20`, `STRUCT_MAX_RECORDS=40`, `LLM_MAX_TOKENS=600`, `LLM_TIMEOUT=180`. The model is preloaded when the server starts.
-
-**What to expect from a 4B model on a laptop**
-- It needs a few GB of free RAM plus roughly 3 to 4 GB of disk for the model. Speed depends heavily on your hardware: a GPU is much faster than CPU only.
-- The first answer after starting is slower (the model loads). Later answers are faster while the model stays in memory.
-- Small models are weaker at following long instructions and at planning filters. Safeguards: plans are validated, wrong plans fall back to similarity search or
-  a plain complete list, exact totals come from MongoDB (never from the model's counting), and if Ollama fails you still get the plain result.
-- If it is too slow: set `STRUCT_PLANNER=off` (skips the planning call), lower `TOP_K` / `MAX_CONTEXT_CHARS`, use the Fast button, or raise `LLM_TIMEOUT`.
-  With `STRUCT_PLANNER=off`, "list all departments" still returns the complete list, but conditions ("only medium priority") are applied by the model reading the records.
-- Larger Ollama models (for example an 8B+) follow instructions better: change `LLM_MODEL`, run `ollama pull <model>`, restart.
-
-Not verified here: this was tested against a simulated Ollama API (request format, errors, the full pipeline), not a live Ollama install.
-
-## 0b. Use Google Gemini (gemini-3.5-flash-lite)
-
-```powershell
-copy .env.gemini.example .env       # then set MONGO_URI, MONGO_DATABASE and GEMINI_API_KEY (key from https://aistudio.google.com/apikey)
-python manage.py check_llm          # tests the model with real calls and says exactly what is wrong, if anything
-python manage.py ingest
-python manage.py runserver
-```
-
-`.env` needs only these three lines for the model: `LLM_PROVIDER=gemini`, `GEMINI_API_KEY=...`, `LLM_MODEL=gemini-3.5-flash-lite`.
-(`GOOGLE_API_KEY` also works as the key name.)
-
-**What the `gemini` provider does differently** (from Google's documentation for Gemini 3.x):
-- It uses Google's OpenAI-compatible endpoint, `https://generativelanguage.googleapis.com/v1beta/openai/`, with an AI Studio key.
-  A key or URL from another provider (for example the Groq URL left in `.env`) gives "model not found" or "key rejected".
-- `temperature` is **never sent**: Google has deprecated it for Gemini 3.x (ignored today, an HTTP 400 in future models).
-  An old `LLM_TEMPERATURE=0` in your `.env` is harmless.
-- The output limit is sent as `max_tokens`. Thinking tokens count toward it; if the limit is hit the app now says so
-  ("ran out of output tokens") instead of showing an empty answer as "not found in the database".
-- Leave `LLM_REASONING_EFFORT` empty: gemini-3.5-flash-lite defaults to the fastest "minimal" thinking.
-- Requests always end with a user turn (Gemini 3.5 rejects a trailing model turn).
-
-**Cost and privacy.** Google lists gemini-3.5-flash-lite at $0.30 per 1M input tokens and $2.50 per 1M output tokens (check the pricing page,
-including any free-tier limits for your account). Only the retrieved records for each question are sent to Google, never the whole database,
-but those records do leave your machine. For sensitive data use the local Ollama profile (section 0).
-
-**If it does not work, run `python manage.py check_llm`:**
-
-| `check_llm` says | Cause | Fix |
-|---|---|---|
-| key rejected by `api.groq.com` (or another host) | wrong `LLM_BASE_URL` or key for another provider | use `LLM_PROVIDER=gemini` and remove `LLM_BASE_URL` / `LLM_API_KEY` of other providers |
-| key rejected by `generativelanguage.googleapis.com` | key invalid, expired or restricted | create a new key in AI Studio, restart the server |
-| model not found at ... | wrong model id | `LLM_MODEL=gemini-3.5-flash-lite` (exact id, all lowercase) |
-| rate-limited | free-tier or per-minute limit | wait, or enable billing for higher limits |
-| took longer than 60s | network or slow response | retry; raise `LLM_TIMEOUT` |
-| ran out of output tokens | thinking used the budget | raise `LLM_MAX_TOKENS` / `LIST_MAX_TOKENS`, clear `LLM_REASONING_EFFORT` |
-| WARNING 2/2 (not valid JSON) | the planner step answered in prose | list/count questions fall back to similarity search; try again or report it |
-
-## 1. Architecture
-
-```
-INGEST  (python manage.py ingest   or   POST /api/ingest/)
- MongoDB collections (discovered automatically)
-   -> read in BATCHES
-   -> relationship resolver: which collection does each ObjectId field point to? load their names in bulk
-   -> universal converter: any document -> readable text (+ metadata, relationships)
-   -> chunking (fits the embedding window)
-   -> skip unchanged chunks (content hash)           <- incremental
-   -> embeddings (local sentence-transformers or OpenAI), normalised
-   -> `rag_embeddings` collection: {embedding, text, metadata, relationships}   <- source of truth
-   -> FAISS HNSW index rebuilt from it (index.faiss + index_meta.json)
-
-ASK  (POST /api/ask/)
- question -> [cache?] -> hybrid search: FAISS HNSW vectors with Roaring-backed filters + MongoDB $text keywords -> Reciprocal Rank Fusion
-          -> multi-hop expansion (follow relationships forward and backward)
-          -> context (character budget) -> LLM (OpenAI-compatible API) -> answer + sources + timings
-```
-
-## 2. Quick start
-
-deactivate
-Remove-Item -Recurse -Force .\venv
-py -3.12 -m venv venv
-.\venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-
-```bash
-py -3.12 -m venv venv && .\venv\Scripts\Activate.ps1        # Mac/Linux: source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt                       # dev/tests: pip install -r requirements-dev.txt
-copy .env.example .env                                  # then edit .env (MONGO_URI, MONGO_DATABASE, LLM_API_KEY)
-python manage.py seed_sample_data                       # optional: cross-referenced example data
-python manage.py ingest                                 # build embeddings + index
-python manage.py runserver                              # http://127.0.0.1:8000
-```
-
-For the local Ollama profile see section 0. For hosted models, start from `.env.cloud.example`: the LLM defaults to Groq with `openai/gpt-oss-20b`. For OpenAI set `LLM_BASE_URL=https://api.openai.com/v1`,
-`LLM_MODEL=gpt-4o-mini`, `LLM_API_KEY=sk-...`. `GROQ_API_KEY` from the previous project still works as a fallback.
-Async serving: `pip install uvicorn` then `uvicorn config.asgi:application`.
-
-## 2b. The interface
-
-Three tabs, all using the same API as your own clients:
-
-- **Chat**: centered glass composer. *Fast* (3 records, no links), *In-depth* (6 records, 1 hop) and *Holistic* (10 records, 2 hops) set `top_k` and `hops` for `/api/ask/`. *Sources* and *Timing* toggles show or hide the source chips and per-stage timings. Answers render Markdown (bold, lists, tables, code) safely; the copy button copies the plain answer.
-- **Search**: `/api/search/` with scores (match, vector, keyword) and relationships, plus an optional "Follow relationships" mode.
-- **Index**: health cards (index, models, cache, MongoDB) and a button that starts `/api/ingest/` and shows the live job log. Enter the token only if `INGEST_TOKEN` is set.
-
-Files: `templates/rag/index.html`, `static/rag/app.css`, `static/rag/app.js` (no external fonts or libraries).
-
-## 3. API
-
-```bash
-# Ask (full RAG)
-curl -X POST localhost:8000/api/ask/ -H "Content-Type: application/json" \
-     -d '{"question": "Which workspace does Aisha Khan belong to?"}'
-
-# Search only (no LLM): optional top_k, collections, hybrid, expand, hops
-curl -X POST localhost:8000/api/search/ -H "Content-Type: application/json" \
-     -d '{"query": "completed projects", "top_k": 5, "collections": ["projects"], "expand": true}'
-
-# Ingest (background job; token required unless DJANGO_DEBUG=True)
-curl -X POST localhost:8000/api/ingest/ -H "Authorization: Bearer $INGEST_TOKEN" -d '{"full": false}'
-curl localhost:8000/api/ingest/ -H "Authorization: Bearer $INGEST_TOKEN"      # job status + log
-curl localhost:8000/api/health/                                               # monitoring
-```
-
-`/api/ask/` returns `{question, answer, sources[{collection, document_id, name, score, related, via}], cached, timings_ms}`.
-Errors are always `{"error": "..."}` with a meaningful status code (400 input, 401 token, 409 job running, 502 LLM, 503 MongoDB/index).
-
-## 4. What each requirement maps to
-
-| Requirement | Where |
-|---|---|
-| Mongo URI, dynamic collections, batches | `services/mongo_service.py` (`list_collections`, `iter_batches`) |
-| Any schema -> natural language (ObjectId, dates, arrays, nested) | `services/document_converter.py` |
-| Metadata: `_id`, ObjectId references, collection, field names | `document_converter.to_records` -> `metadata` |
-| Automatic relationship detection `{field, ref_id, ref_collection}` | `services/relationships.py` |
-| Embeddings, normalised, batched | `services/embedding_service.py` |
-| Separate embeddings collection `{embedding, text, metadata, relationships}` | `services/embedding_store.py` |
-| Semantic search (cosine) with FAISS HNSW and Roaring Bitmap filters | `services/vector_index.py` |
-| Hybrid search (keyword + vector) | `services/keyword_search.py`, `retrieval.rrf_fuse` |
-| Multi-hop resolution | `retrieval.expand` |
-| LLM answering (gpt-oss-20b / OpenAI) | `services/llm_service.py`, `services/rag_service.py` |
-| `/ingest`, `/search`, `/ask` | `views.py`, `urls.py` |
-| Caching, async, logging, monitoring | `cache_service.py`, async views, `middleware.py`, `/api/health/` |
-
-## 5. The stored record
-
+### Example Response
 ```json
 {
-  "_id": "memberships:65a...:0",
-  "embedding": [0.012, -0.044, "..."],
-  "text": "Collection: memberships\nDocument ID: 65a...\nThis is a record in the 'memberships' collection that references users (via user), workspaces (via workspace).\nUser: Aisha Khan (ID: b00...)\nWorkspace: Acme Corp (ID: a00...)\nRole: employee\nStatus: active",
-  "metadata": {"collection": "memberships", "primary_id": "65a...", "chunk_index": 0, "chunk_count": 1,
-               "field_names": ["user", "workspace", "role", "status"], "reference_ids": ["b00...", "a00..."],
-               "display_name": null, "content_hash": "...", "model": "local:sentence-transformers/all-MiniLM-L6-v2",
-               "indexed_at": "2026-..."},
-  "relationships": [{"field": "user", "ref_id": "b00...", "ref_collection": "users", "ref_name": "Aisha Khan"},
-                    {"field": "workspace", "ref_id": "a00...", "ref_collection": "workspaces", "ref_name": "Acme Corp"}]
+  "question": "who is on leave on 13 nov",
+  "answer": "Team members on approved leave on 13 Nov 2026:\n\n- **Anil Bansal** (Anil Bansal | Short Leave (1 day(s), 13 Nov 2026) — Status: `Approved` — Reason: Going Home)",
+  "sources": [
+    {
+      "collection": "leaverequests",
+      "document_id": "6af5b77dc717f79471cd8fbb",
+      "name": "Anil Bansal",
+      "score": null,
+      "related": false
+    }
+  ],
+  "cached": false,
+  "mode": "structured",
+  "collection": "leaverequests",
+  "total_matching": 1,
+  "timings_ms": {
+    "db": 12,
+    "llm": 0,
+    "total": 14
+  }
 }
 ```
 
-Text, metadata, relationships and the vector are one document, so they cannot drift apart. The `_id` is deterministic
-(`collection:document_id:chunk`), so re-ingesting updates in place. HNSW row *i* maps to `ids[i]`, the `_id` of this document.
+---
 
-## 6. How the clever parts work
+## 6. Access Control & Permissions
 
-**Relationship detection (no schema needed).** For each field that holds ObjectIds (or 24-hex strings), a sample of its
-values is checked: (1) the field name is matched to a collection (`userId`, `user_id`, `user` -> `users`; `categoryId` -> `categories`),
-verified by checking those ids really exist there; (2) if the name gives nothing (`createdBy`, `assignedTo`, `owner`), the sample ids are
-looked up in the other collections and the best match wins. Results are cached per `(collection, field)`. Hex strings are only treated as
-references when they resolve, so hashes and tokens are left alone. Dangling references are kept as plain `ID: ...` text.
+- **Admin vs Non-Admin**:
+  - Users with `role: "admin"` in MongoDB have organization-wide visibility across all projects, cards, and team summaries in their workspace.
+  - Non-admin users (`role: "employee"`) have scoped access to their assigned work and publicly queryable status (e.g. organization out-of-office calendar).
+- **Workspace Scoping**: Every request must be tied to a valid `workspace_id`. Membership is strictly verified before data retrieval begins.
+- **Privacy Enforcement**: Non-admins are prohibited from retrieving sensitive private leave records or private work of other employees unless querying shared team calendar status.
 
-**Enrichment.** Names of referenced documents (`name`, `title`, `firstName`+`lastName`, `email`, ...) are loaded with one `$in` query per batch
-and per target collection, and written into the text ("Workspace: Acme Corp"), so questions can use names instead of ids. If a referenced
-name changes, the documents pointing to it get new text, a new hash, and are re-embedded on the next ingest.
+---
 
-**Hybrid search.** Vector results and MongoDB `$text` results (exact words, names, ids) are merged with Reciprocal Rank Fusion
-(`KEYWORD_WEIGHT`, `RRF_K`). If the text index is unavailable it silently falls back to vector search.
+## 7. Automated Testing & Verification
 
-**Multi-hop.** After retrieval, `expand` follows each hit's relationships forward (task -> project -> workspace, up to `MAX_HOPS`) and
-backward (a retrieved user -> tasks assigned to them), capped by `MAX_RELATED`. Related records go to the LLM as `[R1]`, `[R2]`, marked with the link
-they came from, and are listed in `sources` with `related: true`.
+Run automated test suites to verify functionality:
+```powershell
+# Run Django unit test suite
+python manage.py test
 
-**Filtered vector search.** Collection filters are combined as Roaring Bitmaps over HNSW rows, then materialized as cached native
-FAISS selector masks. HNSW applies the selector while traversing its shared graph, so employee filters do not require per-user indexes and are
-enforced during vector search rather than by overfetching unfiltered candidates. Hybrid keyword search continues to apply the same restrictions in MongoDB.
-Existing flat FAISS indexes are detected as an old format and rebuilt from `rag_embeddings` automatically; `python manage.py ingest` can also rebuild it explicitly.
-
-**Performance.** Batched reads and bulk writes; embeddings only for new/changed chunks; model loaded once; FAISS HNSW in memory; query-embedding
-cache and answer cache (invalidated automatically when a new index is written, even by another process); prompt limited by `MAX_CONTEXT_CHARS`;
-blocking work runs in worker threads behind async views; ingestion runs as a background job.
-
-## 7. Configuration
-
-See `.env.example`. Most useful: `TOP_K`, `HYBRID_SEARCH`, `MAX_HOPS`, `MAX_RELATED`, `INCLUDE_REVERSE`, `BATCH_SIZE`, `CHUNK_SIZE`,
-`EXCLUDE_COLLECTIONS`, `EXCLUDE_FIELDS`, `CACHE_TTL_SECONDS` (0 = no answer cache), `EMBEDDING_PROVIDER` (`local` or `openai`).
-Fields named like `password`, `token`, `secret`, `hash`, `salt`, `api_key` are never embedded.
-
-## 8. Testing
-
-```bash
-pip install -r requirements-dev.txt
-python manage.py test        # 90 tests, no MongoDB / internet / API key needed
+# Verify specific leave queries and date boundaries
+python test_specific_leave_queries.py
 ```
 
-Tests use an in-memory MongoDB (mongomock), a deterministic fake embedder and a fake LLM. They cover conversion, relationship detection (by name, by
-probing, string ids), incremental ingestion (unchanged / changed / deleted / renamed references), search, fusion, multi-hop, caching, the context budget,
-the API and auth. **Not covered by the automated tests:** MongoDB `$text` keyword search (mongomock lacks it, so the fallback path is tested), the real
-embedding model, and real LLM calls. Verify those once on your own setup: run `seed_sample_data`, `ingest`, then ask the questions below.
+---
 
-## 9. Try these (sample data)
+## 8. Codebase Structure
 
-| Question | What it exercises |
-|---|---|
-| Which projects have been finished? | semantic match: finished = completed |
-| Which workspace does Aisha Khan belong to? | relationship: membership -> user + workspace (names resolved) |
-| What tasks are assigned to Rohan Mehta? | reverse hop: user -> tasks |
-| Which workspace is the Fix login bug task in? | 2 hops: task -> project -> workspace (set `"hops": 2`) |
-| What is Aisha's password? | never embedded: "I couldn't find that information in the database." |
+```
+MONGO_CHATBOT/
+├── config/
+│   ├── settings.py           # Django configuration, environment loading, logging
+│   ├── urls.py               # Root URL router (/api/v1/ routes)
+│   └── asgi.py / wsgi.py     # Server gateway interfaces
+├── rag/
+│   ├── services/
+│   │   ├── rag_service.py           # Core orchestrator: question routing, context building, asking
+│   │   ├── structured_query.py      # Structured planner, leave engine, project enrichers, ID sanitizer
+│   │   ├── document_converter.py    # Document -> natural language text converter, field sanitizers
+│   │   ├── embedding_store.py       # Qdrant client, self-healing payload indexes, vector search
+│   │   ├── embedding_service.py     # Local ONNX FastEmbed & hosted embedding generation
+│   │   ├── mongo_service.py         # MongoDB connection pooling, batch readers, document fetchers
+│   │   ├── llm_service.py           # Model integrations (Gemini, OpenAI, Ollama), system prompts
+│   │   ├── authorization_service.py # User scope verification, workspace membership checks
+│   │   ├── retrieval.py             # Hybrid search (RRF fusion), multi-hop relation expansion
+│   │   ├── chat_memory.py           # Multi-turn memory management & edit index tracking
+│   │   └── cache_service.py         # In-memory TTL caches for query plans and answers
+│   ├── models.py                    # ChatSession and ChatMessage SQLite models
+│   ├── views.py                     # DRF REST API viewsets and controllers
+│   ├── apps.py                      # App initialization & startup warm-up
+│   └── tests.py                     # Unit and integration test suite
+├── static/                          # Glass UI styling and chat scripts
+├── templates/                       # Frontend HTML templates
+├── manage.py                        # Django CLI entrypoint
+└── requirements.txt                 # Production dependencies
+```
+# Mongo RAG Pro — Chatbot Overview
 
-## 9a. Exact answers for list and count questions
+## What it is
+Mongo RAG Pro is a Django-based chatbot that answers plain-language questions about any MongoDB database. It combines:
+- **Structured queries** (deterministic, exact) for leave/logged-time/user profiles/projects/etc.
+- **RAG** (semantic + keyword hybrid search + LLM generation) for everything else.
+- **Relationship resolution** (ObjectId links between collections).
+- **Role-based access** (employee sees only own records; admin sees all).
 
-Similarity search returns the *nearest* records, so asking for "all 20 departments" can give 6, 8, 10 or 13 depending on the wording.
-For list/count questions (and questions that use a collection name in plural, like "departments" or "tasks") the system now queries MongoDB directly:
+## Architecture (high level)
 
-1. A catalog of collections and fields (sampled, cached 10 minutes) is shown to the LLM, which fills a tiny JSON plan:
-   `{"collection": "tasks", "operation": "list", "filters": [{"field": "priority", "op": "eq", "value": "medium"}]}`.
-2. `structured_query.validate_plan` checks it strictly: known collection, known fields, whitelisted operators (`eq ne in contains gt gte lt lte`).
-   Any doubt rejects the whole plan. A condition is never silently dropped, because that would make an "exact" count wrong.
-   The LLM never writes MongoDB syntax; the code translates the plan.
-3. `count_documents` gives the exact total; `find` gives up to `STRUCT_MAX_RECORDS` (100) records. Filters on reference fields accept names
-   ("assigned to Rohan Mehta" is resolved to ids in `users` first).
-4. The LLM phrases the answer from the exact result. The prompt says whether the list is complete, and the exact total is always stated.
+User (Browser/React)
+  -> Django REST API (/api/v1/ask, /api/v1/search)
+    -> Authorization (JWT + scope resolution)
+    -> RAG Service (ask/search routing)
+       -> Structured Query first (try_structured)
+       -> else Retrieval (hybrid search + embeddings)
+       -> LLM Service (planner + generate)
+    -> Mongo Service (DB access)
+  -> MongoDB (business collections)
+  -> Qdrant (chunk vectors + text/metadata payloads)
+  -> LLM Provider (Ollama / OpenAI / Groq)
 
-Fallbacks: no valid plan -> if the question names a small collection (up to `STRUCT_SCAN_MAX`, 150) the whole collection is read and the LLM is told conditions were NOT applied;
-zero matches -> similarity search (the plan may have misread the question); several collections or calculations -> similarity search.
-Exact answers are not cached (they are always live). They cost one extra small LLM call (the planner). Turn the feature off with `STRUCTURED_QUERIES=false`.
-The chat's timing line shows e.g. `exact query: 20 in departments`.
+## Main collections used
+activities, boards, cards, departments, leave_entries, memberships, notes, projects, subtasks, tasks, users, workspaces
 
-## 9a-2. Speed and "language model unavailable"
+Primary collection is cards (tasks + nested loggedTime entries), used by both structured queries and RAG. users is used for identity/permissions. 
+Qdrant collection `rag_chunks` holds vectors and their text/metadata payloads.
 
-The chat's timing line shows where the time goes. Exact list/count questions report `plan` (catalog + planner LLM call), `db` (MongoDB) and `llm` (final answer);
-other questions report `search`, `expand`, `llm`. Whichever number is large is the culprit.
+## Key services (rag/services/)
+- mongo_service — DB access, list_collections
+- rag_service — ask/search routing, chat memory integration
+- structured_query — deterministic answers (logged time, leave, user profiles, projects, departments, etc.)
+- llm_service — query planning + answer generation
+- retrieval / keyword_search — hybrid search
+- embedding_service / embedding_store / vector_index — embeddings + vector search
+- authorization_service — scope resolution (employee/admin)
+- chat_memory — in-memory session turns
+- cache_service — caching
+- schema_catalog — auto-profiles collections for the LLM
+- ingestion_service / document_converter / chunking — ingestion pipeline
+- relationships — ObjectId link resolution
 
-- **Catalog.** Probing which collection each id field points to is the slowest part. It now happens once, during `python manage.py ingest`, and is saved to
-  `vector_store/catalog.json`; the server loads it from disk (and refreshes it in the background after `CATALOG_MAX_AGE_HOURS`). Run `ingest` once after upgrading.
-- **Plans are cached** per question (1 hour), so repeating a list question skips the planner call.
-- **Only needed fields** go to the LLM ("names of all departments" sends just the names). `STRUCT_MAX_RECORDS` defaults to 60.
-- **Reasoning models are slow.** gpt-oss "thinks" before answering. Set `LLM_REASONING_EFFORT=low` (dropped automatically if the provider rejects it),
-  and optionally `PLANNER_MODEL=<a small fast model your provider offers>` for the planning step.
-- **If the language model fails** during a list/count question, you still get the complete, exact list as a plain result (marked "plain result" in the timing line).
+## Query flow
+1. Request arrives at /api/v1/ask/ with question, optional user_id/email/role, session_id.
+2. If user_id supplied, resolve account + scope from MongoDB; JWT must match; role is informational only.
+3. Anonymous requests can chat but cannot retrieve indexed records.
+4. rag_service.ask:
+   - Try structured_query first (logged time, leave, profiles, etc.).
+   - If no structured answer, retrieve via hybrid search (semantic + keyword), follow ObjectId refs, then LLM generates answer from retrieved records only.
+5. Employee scope restricts records to those linked to their user_id; admin sees all.
+6. Chat history kept in memory, associated with browser session, expires after 1h inactivity, retains latest 10 turns.
 
-Error messages are specific. The server log always has the exact line: `LLM call failed: <ErrorName> (HTTP <status>): ...`.
+## API endpoints
+- POST /api/v1/ask/ — search + generate answer
+- POST /api/v1/search/ — return matching records only
+- GET /api/v1/chats/ — list sessions
+- GET /api/v1/chats/{session_id}/ — read turns
+- POST /api/v1/chats/{session_id}/rename/ — rename
+- DELETE /api/v1/chats/{session_id}/delete/ — delete
+- GET /api/v1/health/ — service status
+- GET/POST /api/v1/ingest/ — ingestion status/start (requires ingest token)
 
-| Message says | Meaning | Fix |
-|---|---|---|
-| took longer than Ns | timeout | `LLM_REASONING_EFFORT=low`, raise `LLM_TIMEOUT`, lower `LIST_MAX_TOKENS` |
-| rate-limited | too many requests/tokens per minute | wait; fewer calls; higher plan |
-| request was too large | token limit of your plan | lower `STRUCT_MAX_RECORDS`, `LIST_MAX_TOKENS`, `MAX_CONTEXT_CHARS` |
-| temporary problem (HTTP 5xx) | provider outage/capacity | retry shortly |
-| could not connect | network or wrong `LLM_BASE_URL` | check internet / URL |
-| API key is invalid / model not found / access denied | configuration | fix `.env`, restart |
+## Security
+- No user account required to reach service; deploy only on trusted networks.
+- Admin determined by MongoDB role, not request role field.
+- Employee cannot view another user's data; cross-user name queries return "not authenticated" style response.
+- JWT_SECRET must match between Django and frontend for account-scoped requests.
 
-## 9b. "Why only a few results?" (similarity search)
+## Safety warning system
+- The same request guard runs before chat generation and search retrieval for every account, including admins.
+- It blocks natural-language requests to delete, edit, bulk-change, or alter access/security settings, and requests to expose credentials or sensitive employee data.
+- Blocked responses include `blocked: true`, a warning category, and a user-facing message; no business-data query or LLM call is made for that request.
+- Conceptual questions about these operations remain available. The chatbot has no business-record write tool; approved audited workflows remain the place to make authorized changes.
 
-Similarity search returns the *closest* records, not every match. How many is set by `top_k`: Fast = 3, In-depth = 6, Holistic = 10, API up to 50.
-List-style questions ("list all...", "which projects...", "how many...", "show me...") automatically retrieve at least `LIST_TOP_K` (default 30) chunks,
-with a larger prompt budget (`LIST_CONTEXT_CHARS`) and answer length (`LIST_MAX_TOKENS`). The reply's timing line shows how many records were used.
-This is still bounded: for complete lists or exact counts over big data, a structured MongoDB query is needed (see limits).
+## Ingestion
+- Documents of any schema converted to natural language.
+- ObjectId relationships detected and resolved.
+- Embeddings and chunk payloads stored in Qdrant; source records remain in MongoDB.
+- Run: python manage.py ingest
 
-## 10. Limits and next steps
+## Logged-time feature (recently enhanced)
+- Reads nested loggedTime entries on cards.
+- Supports exact date, month, year, week scoping.
+- Superlative queries: "who has highest/lowest logged time in September / 2026 / this week".
+- Team-level ranking aggregates per person and names the top contributor.
+- Period resolution: _extract_period handles bare months, bare years, "this week/month/year", exact dates.
 
-- HNSW is approximate; increase `HNSW_EF_SEARCH` in `services/vector_index.py` for higher recall at increased query cost. Beyond the local index use MongoDB Atlas Vector Search (the `embedding` field is already a
-  plain number array; index it with `{"fields":[{"type":"vector","path":"embedding","numDimensions":384,"similarity":"cosine"},
-  {"type":"filter","path":"metadata.collection"}]}`) and replace `vector_index.search` with a `$vectorSearch` aggregation. Not implemented here.
-- Changing the embedding model requires `ingest --full` (detected and reported automatically).
-- Exact queries cover lists and counts over ONE collection with simple conditions. Sums, averages, grouping and multi-collection joins still go through similarity search.
-- PDFs and binary fields are ignored; only text stored in fields is indexed.
-- Logged-in employees can search their own user profile and source records whose indexed relationships directly reference their user ID. Admin access is granted only when `users.role` is exactly `admin`; it bypasses the employee record filter. Workspace membership does not grant access to every workspace record.
-- Employee list/count requests use scoped semantic retrieval rather than unrestricted structured MongoDB queries. These results may not be complete or exact.
-- After deploying access controls, rebuild the index with `python manage.py ingest --full` so relationship metadata is current. `/api/ingest/` requires `INGEST_TOKEN` outside DEBUG.
+## Configuration
+- .env (from .env.example) for local Ollama profile.
+- MONGO_URI, MONGO_DATABASE and QDRANT_URL/QDRANT_API_KEY required (or configure QDRANT_PATH for local embedded mode).
+- LLM_PROVIDER: ollama (default local) / openai / groq.
+- CORS via DJANGO_CORS_ALLOWED_ORIGINS.
 
-llm_service.py: Builds LLM prompts and plans structured database queries; updated to pass recent chat turns to the planner and avoid guessing when facts are missing.
+## Running locally
+1. copy .env.example .env
+2. set MongoDB and Qdrant settings
+3. python -m pip install -r requirements.txt
+4. python manage.py ingest --full
+5. python manage.py runserver
+6. (Ollama) ollama pull gemma3:4b
 
-structured_query.py: Runs exact list/count queries; updated to use chat history when interpreting follow-ups.
-
-rag_service.py: Coordinates each chat request, history, search, and answers; updated to resolve “first one” from the previous list and keep generated answers out of search terms.
-
-tests.py: Automated tests for the chat and query behavior changes.
-
-app.js: Creates the chat loading indicator; removed the equalizer bars.
-
-app.css: Styles chat and scrolling; hides the chatbot’s scrollbars while keeping scrolling enabled.
-
-index.html: Main page template; loads the CSS and JavaScript with versioned URLs so browsers fetch the updates.
+## Tech stack
+Django, Django REST Framework, MongoDB (pymongo), Qdrant, sentence-transformers, Ollama/OpenAI/Groq, mongomock (tests).

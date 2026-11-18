@@ -1,6 +1,7 @@
 """Resolve the public scope and legacy account scopes used by the retrieval service."""
 from dataclasses import dataclass
 import hashlib
+import logging
 import re
 
 from bson import ObjectId
@@ -9,7 +10,9 @@ from pymongo.errors import PyMongoError
 
 from . import embedding_store, mongo_service
 from .document_converter import pick_display_name
-from .exceptions import AuthorizationError, ConfigError, MongoServiceError
+from .exceptions import AuthorizationError, ConfigError, InvalidRequestError, MongoServiceError, VectorStoreError
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -19,6 +22,7 @@ class AccessScope:
     embedding_ids: frozenset[str] | None
     cache_key: str
     chat_owner_id: str
+    workspace_id: str | None = None
     user_name: str | None = None
     user_email: str | None = None
     user_role: str | None = None
@@ -79,8 +83,55 @@ def mentions_another_user(question: str, user_id: str, current_user_name: str | 
         raise MongoServiceError("Could not verify the requested employee.") from exc
 
 
-def resolve_scope(user_id: str | None, email: str | None = None) -> AccessScope:
-    """Return a no-data anonymous scope or a database-verified account scope."""
+def _workspace_scoped_ids(workspace_id: str) -> frozenset:
+    """Embedding ids tagged with the given workspace (used to scope admins)."""
+    try:
+        return embedding_store.find_ids_by_workspace(workspace_id)
+    except (PyMongoError, ConfigError, MongoServiceError, VectorStoreError) as exc:
+        raise MongoServiceError("Could not load workspace data permissions.") from exc
+
+
+def _validate_workspace(db, workspace_id: str) -> str:
+    """Reject malformed or unknown workspace ids. Returns the canonical string id."""
+    workspace_id = str(workspace_id).strip()
+    if not workspace_id or len(workspace_id) > 128 or any(ch.isspace() for ch in workspace_id):
+        raise InvalidRequestError("'workspace_id' must be a valid workspace identifier.")
+    try:
+        workspace = db["workspaces"].find_one({"_id": {"$in": _id_values(workspace_id)}}, {"_id": 1})
+    except (PyMongoError, ConfigError, MongoServiceError) as exc:
+        raise MongoServiceError("Could not verify the workspace.") from exc
+    if not workspace:
+        raise InvalidRequestError("Workspace not found.")
+    return str(workspace["_id"])
+
+
+def _verify_workspace_membership(db, user, workspace_id: str) -> None:
+    """Non-admins must be a member of the requested workspace (fail closed)."""
+    if str(user.get("lastActiveWorkspace") or "") == workspace_id:
+        return
+    user_variants = _id_values(str(user["_id"]))
+    ws_variants = _id_values(workspace_id)
+    try:
+        for collection_name in ("workspacememberships", "memberships"):
+            for user_field in ("user", "userId", "memberId"):
+                for ws_field in ("workspace", "workspaceId"):
+                    doc = db[collection_name].find_one(
+                        {user_field: {"$in": user_variants}, ws_field: {"$in": ws_variants}},
+                        {"_id": 1})
+                    if doc:
+                        return
+    except (PyMongoError, ConfigError, MongoServiceError) as exc:
+        raise MongoServiceError("Could not verify workspace membership.") from exc
+    raise AuthorizationError("You are not a member of this workspace.")
+
+
+def resolve_scope(user_id: str | None, email: str | None = None,
+                  workspace_id: str | None = None) -> AccessScope:
+    """Return a no-data anonymous scope or a database-verified account scope.
+
+    `workspace_id` (optional) restricts retrieval to one workspace. It must be a real
+    workspace, and non-admins must be a member of it.
+    """
     if isinstance(user_id, str) and user_id.startswith("guest:"):
         owner_id = user_id
         return AccessScope(owner_id, False, frozenset(), "public:anonymous", owner_id,
@@ -120,9 +171,9 @@ def resolve_scope(user_id: str | None, email: str | None = None) -> AccessScope:
 
     # Resolve the user's company from lastActiveWorkspace reference.
     user_company = None
-    workspace_id = user.get("lastActiveWorkspace")
-    if workspace_id:
-        sid = str(workspace_id)
+    last_workspace = user.get("lastActiveWorkspace")
+    if last_workspace:
+        sid = str(last_workspace)
         try:
             workspace = mongo_service.get_db()["workspaces"].find_one(
                 {"_id": {"$in": [sid, ObjectId(sid) if len(sid) == 24 else sid]}}
@@ -131,29 +182,43 @@ def resolve_scope(user_id: str | None, email: str | None = None) -> AccessScope:
                 user_company = pick_display_name(workspace)
         except Exception:
             user_company = None
-    if is_admin:
-        return AccessScope(user_id, True, None, f"{user_id}:admin:all", f"{user_id}:account",
-                           user_name=user_name, user_email=user_email, user_role=user_role,
-                           user_company=user_company)
 
-    query = {
-        "$or": [
-            {"metadata.collection": "users", "metadata.primary_id": str(user["_id"])},
-            {"relationships": {"$elemMatch": {
-                "ref_collection": "users", "ref_id": str(user["_id"]),
-            }}},
-        ],
-    }
+    # Optional workspace scoping: validate the requested workspace and, for
+    # non-admins, verify membership (or that it is their active workspace).
+    if workspace_id is not None:
+        workspace_id = _validate_workspace(mongo_service.get_db(), workspace_id)
+        if not is_admin:
+            _verify_workspace_membership(mongo_service.get_db(), user, workspace_id)
+
+    if is_admin:
+        if workspace_id is None:
+            return AccessScope(user_id, True, None, f"{user_id}:admin:all", f"{user_id}:account",
+                               user_name=user_name, user_email=user_email, user_role=user_role,
+                               user_company=user_company)
+        ids = _workspace_scoped_ids(workspace_id)
+        return AccessScope(
+            user_id, True, ids, f"{user_id}:admin:ws:{hashlib.sha256(workspace_id.encode('utf-8')).hexdigest()[:16]}",
+            f"{user_id}:account", workspace_id=workspace_id,
+            user_name=user_name, user_email=user_email, user_role=user_role,
+            user_company=user_company,
+        )
+
     try:
-        ids = frozenset(doc["_id"] for doc in embedding_store.collection().find(query, {"_id": 1}))
+        ids = embedding_store.find_ids_for_user(str(user["_id"]), workspace_id)
+    except VectorStoreError as exc:
+        logger.exception("Qdrant access-scope lookup failed")
+        raise MongoServiceError("Could not load account data permissions.") from exc
     except (PyMongoError, ConfigError, MongoServiceError) as exc:
         raise MongoServiceError("Could not load account data permissions.") from exc
 
     # The digest keeps cache entries isolated when the user's indexed links change.
     scope_digest = hashlib.sha256("\0".join(sorted(ids)).encode("utf-8")).hexdigest()
+    cache_key = f"{user_id}:employee:{scope_digest}"
+    if workspace_id is not None:
+        cache_key += f":ws:{hashlib.sha256(workspace_id.encode('utf-8')).hexdigest()[:16]}"
     return AccessScope(
-        user_id, False, ids, f"{user_id}:employee:{scope_digest}",
-        f"{user_id}:account",
+        user_id, False, ids, cache_key,
+        f"{user_id}:account", workspace_id=workspace_id,
         user_name=user_name, user_email=user_email, user_role=user_role,
         user_company=user_company,
     )

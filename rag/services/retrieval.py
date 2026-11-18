@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from django.conf import settings
 
 from . import embedding_service, embedding_store, keyword_search, mongo_service, vector_index
+from . import document_converter
 from .exceptions import VectorStoreError
 
 logger = logging.getLogger(__name__)
@@ -45,7 +46,7 @@ class Hit:
 
 def _to_hit(doc: dict, **extra) -> Hit:
     meta = doc.get("metadata", {})
-    return Hit(id=doc["_id"], text=doc.get("text", ""), collection=meta.get("collection", ""),
+    return Hit(id=doc["_id"], text=document_converter.redact_sensitive_text(doc.get("text", "")), collection=meta.get("collection", ""),
                primary_id=meta.get("primary_id", ""), chunk_index=meta.get("chunk_index", 0),
                display_name=meta.get("display_name"), relationships=doc.get("relationships", []), **extra)
 
@@ -145,9 +146,13 @@ def expand(hits: list, hops: int = None, max_related: int = None, allowed_ids=No
 
         if level == 0 and settings.INCLUDE_REVERSE:
             hit_ids = [h.primary_id for h in hits if h.primary_id]
-            batch_ref = embedding_store.find_referencing_batch(
-                hit_ids, limit_per_id=settings.REVERSE_PER_RECORD, allowed_ids=allowed_ids
-            )
+            try:
+                batch_ref = embedding_store.find_referencing_batch(
+                    hit_ids, limit_per_id=settings.REVERSE_PER_RECORD, allowed_ids=allowed_ids
+                )
+            except Exception as exc:
+                logger.warning("Reverse relationship lookup failed non-fatally; continuing with primary hits: %s", exc)
+                batch_ref = {}
             for hit in hits:
                 if len(related) >= max_related:
                     break

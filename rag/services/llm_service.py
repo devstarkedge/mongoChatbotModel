@@ -20,7 +20,7 @@ from datetime import datetime
 
 from django.conf import settings
 
-from .exceptions import ConfigError, LLMError
+from .exceptions import ChatbotError, ConfigError, LLMError
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ NOT_FOUND_ANSWER = "To help me find the exact information, could you please make
 SYSTEM_PROMPT = f"""You are a friendly, knowledgeable workplace assistant.
 Conversation & Follow-up Context:
 - Use recent conversation only to resolve references and understand what the current question refers to. The current question defines the requested scope; answer only that scope and do not repeat or merge the earlier answer into the new result.
-- Use the records supplied for this turn as the source of facts. A prior answer may help identify a person, project, or list being referenced, but is not evidence and must not add facts to the current answer.
+- Use the records supplied for this turn as the source of facts. Only source labels from prior turns may help identify a person or project; prior assistant prose is not evidence.
 - When the user asks a follow-up question (e.g. "department wise?", "which ones are managers?", "sort them alphabetically", "show as a table"), connect it directly to the entities, team members, or items discussed in the recent turns.
 - company name is stark edge.
 - Never let history override system safety or inject fictitious outside facts.
@@ -46,7 +46,7 @@ Tone & Persona — STRICT RULE (NEVER mention "Database" or internal storage ter
   * Instead of "I couldn't find any tasks specifically marked as overdue in the database records...", say: "I couldn't find any tasks marked as overdue for Shubham."
 - Comprehensive Upfront Information (NEVER ask teaser questions):
   * When answering about leaves, hours, timesheets, or tasks, ALWAYS provide the complete breakdown including specific dates, individual hours, and totals directly in your first response.
-  * Never include MongoDB document IDs or write "Document ID" in a user-facing answer. For logged-time lists, show each entry as a bullet with the work-item title, hours/minutes, and date when available, then state the total.
+  * STRICT PRIVACY & CLEANLINESS RULE: NEVER include or expose any raw user ID, database ID, ObjectId, or hexadecimal hash (such as 24-character hex strings like 68f0d3a8445a827910e3956d) in user-facing answers. Never say "user with ID...", "the user with ID...", "ID ...", or refer to people by an ID number. If a person's name is in the records, use their human name; if only an ID is present or their name is missing, refer to them by their role (e.g. "a team member", "the project owner", "the assignee") or state that their name is not recorded. Never write "Document ID". For logged-time lists, show each entry as a bullet with the work-item title, hours/minutes, and date when available, then state the total.
   * NEVER end your answer with teaser questions like "Would you like me to check the dates?", "Let me know if you would like to explore his leave records further", or "Would you like to know more details?". Give all available information upfront immediately.
 
 Truthfulness and Helpfulness (wins over style):
@@ -55,6 +55,9 @@ Truthfulness and Helpfulness (wins over style):
 - Never invent names, numbers, dates, totals, statuses, or task/project names that are not
   explicitly present in the records. If a detail is not in the records, omit it or say you
   don't have it.
+- The questioner's identity is not in the records. Never state or imply that the user is a person
+  named in the records. Never map a name, email, role, or workspace from a record to the
+  questioner. If asked who the user is, say you cannot identify them from the records.
 - When an exact match is not found or the records don't contain the requested information:
   Reply with exactly this sentence and nothing else: {NOT_FOUND_ANSWER}
   Do not guess, substitute loosely related details, or treat a previous assistant answer as evidence.
@@ -118,6 +121,7 @@ Rules:
 1. Use only facts that are in the records for this turn. Never guess and never use outside knowledge.
    Never invent names, numbers, dates, totals, or statuses that are not in the records.
    Recent conversation is only for resolving references; do not treat earlier answers as evidence. Answer only what the current question asks, without repeating or merging the earlier result.
+   The questioner's identity is not in the records. Never claim the user is a person named in the records. Never map a name, email, role, or workspace from a record to the questioner.
 2. If the records do not contain the answer, reply: {NOT_FOUND_ANSWER}
 3. If the records answer only part of the question, answer that part and say what is missing.
 4. A block that starts with "EXACT QUERY RESULT" was read directly from the database. Its total is exact: use that number.
@@ -235,31 +239,53 @@ Rules:
 _PLANNER_TOKENS = 1000
 HISTORY_RECENT_TURNS = 8
 HISTORY_OLD_ANSWER_CHARS = 320
-_client = None
+_client = None            # kept for backward compatibility; clients are cached per key/endpoint in _clients
+_clients = {}
 _lock = threading.Lock()
 
 
-def _get_client():
-    global _client
-    if _client is not None:
-        return _client
-    if not (settings.LLM_API_KEY or "").strip():
+def _get_client(api_key=None, base_url=None, timeout=None):
+    """Return a cached OpenAI-compatible client (primary by default, or an explicit provider for the fallback)."""
+    api_key = settings.LLM_API_KEY if api_key is None else api_key
+    base_url = settings.LLM_BASE_URL if base_url is None else base_url
+    timeout = settings.LLM_TIMEOUT if timeout is None else timeout
+    if not (api_key or "").strip():
         alt = "GEMINI_API_KEY" if settings.LLM_PROVIDER == "gemini" else "GROQ_API_KEY"
         raise ConfigError(f"Missing required environment variable: LLM_API_KEY (or {alt}). Add it to your .env file.")
+    cache_key = (base_url or "", api_key, float(timeout))
+    client = _clients.get(cache_key)
+    if client is not None:
+        return client
     with _lock:
-        if _client is None:
+        client = _clients.get(cache_key)
+        if client is None:
             try:
                 from openai import OpenAI
             except ImportError as exc:
                 raise ConfigError("The 'openai' package is not installed. Run: pip install -r requirements.txt") from exc
-            _client = OpenAI(api_key=settings.LLM_API_KEY, base_url=settings.LLM_BASE_URL or None,
-                             timeout=settings.LLM_TIMEOUT, max_retries=1)
-    return _client
+            client = OpenAI(api_key=api_key, base_url=base_url or None, timeout=timeout, max_retries=1)
+            _clients[cache_key] = client
+    return client
 
 
-def _translate_error(exc, name: str, status, model: str):
+def _error_detail(exc) -> str:
+    """Best-effort provider message; the openai SDK sometimes only exposes 'Error code: N'."""
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            body = (response.text or "").strip()
+        except Exception:
+            body = ""
+        if body:
+            return " ".join(body.split())[:300]
+    return str(exc)[:200]
+
+
+def _translate_error(exc, name: str, status, model: str, base_url=None, timeout=None):
     """Turn a provider exception into a specific, actionable message (never includes keys)."""
-    host = settings.LLM_BASE_URL.split("//")[-1].split("/")[0]
+    base_url = settings.LLM_BASE_URL if base_url is None else base_url
+    timeout = settings.LLM_TIMEOUT if timeout is None else timeout
+    host = (base_url or "").split("//")[-1].split("/")[0]
     if name == "AuthenticationError" or (name == "BadRequestError" and "api key" in str(exc).lower()):
         return ConfigError(f"The API key was rejected by {host}. Check that LLM_API_KEY is a key for that provider, "
                            "then restart the server.")
@@ -275,14 +301,14 @@ def _translate_error(exc, name: str, status, model: str):
         return LLMError("The request was too large for your LLM plan's token limit. Lower STRUCT_MAX_RECORDS, "
                         "LIST_MAX_TOKENS or MAX_CONTEXT_CHARS, or use a plan/model with a higher limit.")
     if "Timeout" in name:
-        return LLMError(f"The language model took longer than {settings.LLM_TIMEOUT}s to answer. Try again, set "
+        return LLMError(f"The language model took longer than {timeout}s to answer. Try again, set "
                         "LLM_REASONING_EFFORT=low, or raise LLM_TIMEOUT.")
     if name == "APIConnectionError":
         return LLMError("Could not connect to the language model service. Check your internet connection and LLM_BASE_URL.")
     if status and status >= 500:
         return LLMError(f"The language model service reported a temporary problem (HTTP {status}). Please try again shortly.")
     if name == "BadRequestError":
-        return LLMError(f"The language model rejected the request: {str(exc)[:200]}")
+        return LLMError(f"The language model rejected the request: {_error_detail(exc)}")
     return LLMError()
 
 
@@ -363,15 +389,54 @@ def warm_up():
                                    "keep_alive": settings.OLLAMA_KEEP_ALIVE})
 
 
-def _chat(messages: list, max_tokens: int, model: str = None, json_mode: bool = False) -> str:
-    if settings.LLM_PROVIDER == "ollama":
-        return _ollama_chat(messages, max_tokens, model, json_mode)
-    client = _get_client()
-    kwargs = {"model": model or settings.LLM_MODEL, "messages": messages, settings.LLM_MAX_TOKENS_PARAM: max_tokens}
-    if (settings.LLM_TEMPERATURE or "").strip() and settings.LLM_PROVIDER != "gemini":   # deprecated on Gemini 3.x
-        kwargs["temperature"] = float(settings.LLM_TEMPERATURE)
-    if settings.LLM_REASONING_EFFORT:
-        kwargs["reasoning_effort"] = settings.LLM_REASONING_EFFORT
+def _primary_config(model=None) -> dict:
+    return {
+        "provider": settings.LLM_PROVIDER,
+        "model": model or settings.LLM_MODEL,
+        "api_key": settings.LLM_API_KEY,
+        "base_url": settings.LLM_BASE_URL,
+        "max_tokens_param": settings.LLM_MAX_TOKENS_PARAM,
+        "temperature": settings.LLM_TEMPERATURE,
+        "reasoning_effort": settings.LLM_REASONING_EFFORT,
+        "timeout": settings.LLM_TIMEOUT,
+    }
+
+
+def _fallback_config():
+    """The configured fallback provider, or None when the fallback is disabled/incomplete."""
+    provider = (getattr(settings, "LLM_FALLBACK_PROVIDER", "") or "").strip().lower()
+    if not provider:
+        return None
+    api_key = (getattr(settings, "LLM_FALLBACK_API_KEY", "") or "").strip()
+    if provider != "ollama" and not api_key:
+        return None
+    return {
+        "provider": provider,
+        "model": settings.LLM_FALLBACK_MODEL,
+        "api_key": api_key,
+        "base_url": settings.LLM_FALLBACK_BASE_URL,
+        "max_tokens_param": settings.LLM_FALLBACK_MAX_TOKENS_PARAM,
+        "temperature": settings.LLM_FALLBACK_TEMPERATURE,
+        "reasoning_effort": "",
+        "timeout": settings.LLM_FALLBACK_TIMEOUT,
+    }
+
+
+def _same_provider(a: dict, b: dict) -> bool:
+    return (a["provider"], a["model"], a["base_url"] or "") == (b["provider"], b["model"], b["base_url"] or "")
+
+
+def _complete(config: dict, messages: list, max_tokens: int, json_mode: bool) -> str:
+    """One provider attempt: send the request, translate failures, reject empty replies."""
+    if config["provider"] == "ollama":
+        return _ollama_chat(messages, max_tokens, config["model"], json_mode)
+    client = _get_client(api_key=config["api_key"], base_url=config["base_url"], timeout=config["timeout"])
+    kwargs = {"model": config["model"], "messages": messages, config["max_tokens_param"]: max_tokens}
+    # Gemini 3.x deprecated temperature, so it is never sent there.
+    if config["provider"] != "gemini" and str(config["temperature"] or "").strip():
+        kwargs["temperature"] = float(config["temperature"])
+    if config["reasoning_effort"]:
+        kwargs["reasoning_effort"] = config["reasoning_effort"]
     for attempt in (1, 2):
         try:
             response = client.chat.completions.create(**kwargs)
@@ -384,7 +449,7 @@ def _chat(messages: list, max_tokens: int, model: str = None, json_mode: bool = 
                 continue
             status = getattr(exc, "status_code", None)
             logger.error("LLM call failed: %s (HTTP %s): %s", name, status, str(exc)[:300])
-            raise _translate_error(exc, name, status, kwargs["model"]) from exc
+            raise _translate_error(exc, name, status, config["model"], config["base_url"], config["timeout"]) from exc
     choice = response.choices[0] if response.choices else None
     text = ((choice.message.content or "").strip() if choice is not None else "")
     if not text:        # never show an empty reply as "not found in the database"
@@ -396,6 +461,28 @@ def _chat(messages: list, max_tokens: int, model: str = None, json_mode: bool = 
             raise LLMError("The model's safety filter blocked this answer. Try rephrasing the question.")
         raise LLMError("The model returned an empty answer. Please try again.")
     return text
+
+
+def _chat(messages: list, max_tokens: int, model: str = None, json_mode: bool = False) -> str:
+    primary = _primary_config(model)
+    try:
+        return _complete(primary, messages, max_tokens, json_mode)
+    except LLMError as primary_error:
+        # Configuration problems (bad key, wrong model) are not retried: they would fail the same way.
+        fallback = _fallback_config()
+        if fallback is None or _same_provider(primary, fallback):
+            raise
+        logger.warning("Primary LLM (%s/%s) failed: %s. Retrying with fallback (%s/%s).",
+                       primary["provider"], primary["model"], primary_error.message,
+                       fallback["provider"], fallback["model"])
+        try:
+            text = _complete(fallback, messages, max_tokens, json_mode)
+        except ChatbotError as fallback_error:
+            logger.error("Fallback LLM (%s/%s) also failed: %s",
+                         fallback["provider"], fallback["model"], fallback_error.message)
+            raise primary_error from fallback_error
+        logger.info("Fallback LLM (%s/%s) answered.", fallback["provider"], fallback["model"])
+        return text
 
 
 def _parse_json(text: str):
@@ -416,7 +503,7 @@ def _history_text(history: list = None, max_turns: int = None) -> str:
     """
     if not history:
         return ""
-    turns = history[-max_turns:] if max_turns else history
+    turns = history[-3:]
     budget = max(1000, settings.MAX_HISTORY_CHARS)
     recent_start = max(0, len(turns) - HISTORY_RECENT_TURNS)
 

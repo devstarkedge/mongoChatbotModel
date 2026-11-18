@@ -355,7 +355,8 @@
     }
 
     function addBot(parts, isError) {
-        const bubble = h("div", { class: "bubble" }, parts.body);
+        const bubble = h("div", { class: "bubble" + (parts.warning ? " safety-warning" : "") }, parts.body);
+        if (parts.warning) bubble.setAttribute("role", "alert");
         if (parts.sources && parts.sources.length) {
             bubble.append(h("div", { class: "sources" }, h("span", { class: "src-label" }, "Sources"), parts.sources.map(sourceChip)));
         }
@@ -437,7 +438,7 @@
             });
             typing.remove();
             if (ok) {
-                const botMsg = addBot({ body: renderMarkdown(data.answer), sources: data.sources, timing: timingText(data), copyText: data.answer });
+                const botMsg = addBot({ body: renderMarkdown(data.answer), sources: data.sources, timing: timingText(data), copyText: data.answer, warning: data.blocked });
                 const turn = opts.editedTurn || userTurns[userTurns.length - 1];
                 if (turn) {
                     turn.botNode = botMsg;
@@ -679,6 +680,12 @@
             });
             out.replaceChildren();
             if (!ok) { out.append(h("div", { class: "card empty-note" }, data.error || `Error ${status}`)); return; }
+            if (data.blocked && data.warning) {
+                const warning = h("div", { class: "card empty-note safety-warning" }, data.warning.message);
+                warning.setAttribute("role", "alert");
+                out.append(warning);
+                return;
+            }
             if (!data.results.length) { out.append(h("div", { class: "card empty-note" }, "No matching records.")); return; }
             data.results.forEach((r) => out.append(resultCard(r, false)));
             if (data.related && data.related.length) {

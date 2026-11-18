@@ -145,13 +145,20 @@ def get_history_state(session):
     for index in range(0, len(messages) - 1, 2):
         user_message, bot_message = messages[index:index + 2]
         if user_message.role == ChatMessage.ROLE_USER and bot_message.role == ChatMessage.ROLE_BOT:
-            history.append({"question": user_message.content, "answer": bot_message.content})
+            history.append({
+                "question": user_message.content,
+                "answer": bot_message.content,
+                "sources": bot_message.sources or [],
+            })
     offset = max(len(history) - MAX_TURNS, 0)
     return {"turns": history[-MAX_TURNS:], "offset": offset}
 
 
 def get_history(session):
-    return get_history_state(session)["turns"]
+    return [
+        {"question": turn["question"], "answer": turn["answer"]}
+        for turn in get_history_state(session)["turns"]
+    ]
 
 
 def append_message(session, role, content, sources=None):

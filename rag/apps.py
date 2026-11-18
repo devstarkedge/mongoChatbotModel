@@ -16,7 +16,7 @@ def _warm_up():
     try:
         rag_service.warm_up()
         logger.info("Warm-up finished.")
-    except Exception as exc:
+    except Exception as exc:                                           
         logger.info("Warm-up skipped: %s", exc)
 
 
@@ -24,8 +24,12 @@ class RagConfig(AppConfig):
     name = "rag"
 
     def ready(self):
-        if not settings.WARMUP_ON_START or "runserver" not in sys.argv:
+        if not settings.WARMUP_ON_START:
             return
-        if "--noreload" not in sys.argv and os.environ.get("RUN_MAIN") != "true":
+        # Skip warm-up for CLI commands where server is not starting
+        skip_commands = {"migrate", "makemigrations", "collectstatic", "test", "shell", "ingest", "inspectdb"}
+        if any(cmd in sys.argv for cmd in skip_commands):
+            return
+        if "runserver" in sys.argv and "--noreload" not in sys.argv and os.environ.get("RUN_MAIN") != "true":
             return
         threading.Thread(target=_warm_up, daemon=True).start()

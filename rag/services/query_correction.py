@@ -44,6 +44,9 @@ _PROTECTED_WORDS = {
     "bug", "bugs", "fix", "fixes", "feature", "features", "release", "releases",
     "review", "reviews", "reviewed", "code", "coding", "design", "designs",
     "doc", "docs", "document", "documents", "documentation", "new", "old",
+    # Negation-prefixed status words — must NOT be corrected to their root
+    "uncompleted", "uncomplete", "incomplete", "incomplet", "unfinished",
+    "inprogress", "notcompleted", "notcomplete", "unfinish",
 }
 
 
@@ -76,9 +79,8 @@ def _load_vocabulary():
             for term in _PROTECTED_WORDS:
                 counts[term] = 50
             try:
-                cursor = embedding_store.collection().find({}, {"text": 1})
-                for doc in cursor:
-                    counts.update(token.lower() for token in _TOKEN.findall(doc.get("text", ""))
+                for text in embedding_store.all_texts():
+                    counts.update(token.lower() for token in _TOKEN.findall(text)
                                   if len(token) >= 3)
             except Exception:
                 logger.exception("Could not build the query spelling vocabulary")

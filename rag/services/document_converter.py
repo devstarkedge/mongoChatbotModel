@@ -60,6 +60,26 @@ MAX_LIST_ITEMS = 20
 MAX_DEPTH = 4
 MAX_FIELD_NAMES = 200
 
+# Redact credential-bearing text fields as well as credential-named Mongo fields.
+# Descriptions are free-form and commonly contain pasted login instructions.
+_CREDENTIAL_LINE = re.compile(
+    r"(?i)(?:password|passwd|passcode|secret|api[ _-]?key|access[ _-]?token|"
+    r"refresh[ _-]?token|bearer\s+token|private[ _-]?key)\s*[:=–—-]"
+)
+
+
+def redact_sensitive_text(text: str) -> str:
+    """Remove lines containing explicit credential assignments from free text."""
+    if not isinstance(text, str) or not text:
+        return text
+    lines = []
+    for line in text.splitlines():
+        if _CREDENTIAL_LINE.search(line):
+            lines.append("[credentials redacted]")
+        else:
+            lines.append(line)
+    return "\n".join(lines)
+
 
 # ------------------------------------------------------------------ helpers
 def humanize_key(key) -> str:
@@ -187,7 +207,7 @@ class _Walker:
             return "text", f"{value:%B} {value.day}, {value.year}"
         if isinstance(value, (int, float, Decimal, Decimal128)):
             return "text", str(value)
-        text = strip_html(" ".join(str(value).split()))
+        text = redact_sensitive_text(strip_html(" ".join(str(value).split())))
         if not text:
             return None
         if HEX24.match(text) and self.resolver is not None:
@@ -216,11 +236,15 @@ class _Walker:
     @staticmethod
     def _ref_line(label, refs):
         base = LABEL_ID_SUFFIX.sub("", label).strip() or "Reference"
+        is_user_field = base.lower() in {"owner", "members", "member", "assignee", "assignees", "user", "created by", "uploaded by"}
+        names = [name for _, name in refs if name]
+        if names:
+            return f"{base}: " + ", ".join(names)
+        if is_user_field:
+            return ""
         if len(refs) == 1:
             sid, name = refs[0]
-            return f"{base}: {name} (ID: {sid})" if name else f"{base} ID: {sid}"
-        if any(name for _, name in refs):
-            return f"{base}: " + ", ".join(f"{n} (ID: {i})" if n else f"ID {i}" for i, n in refs)
+            return f"{base}: {name}" if name else f"{base} ID: {sid}"
         return f"{base} IDs: " + ", ".join(i for i, _ in refs)
 
 

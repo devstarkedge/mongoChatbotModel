@@ -214,6 +214,7 @@ button { font: inherit; color: inherit; }
           border: 1px solid var(--edge); box-shadow: var(--shadow); overflow-wrap: anywhere; }
 .msg.error .bubble { background: rgba(255, 238, 238, .85); border-color: #f0b5b5; color: #8a2d2d; }
 .msg.error .avatar { background: #c0392b; }
+.safety-warning { border-color: rgba(185, 122, 6, .5) !important; background: rgba(255, 247, 224, .94) !important; color: #684500 !important; }
 
 .md > :first-child { margin-top: 0; }
 .md > :last-child { margin-bottom: 0; }

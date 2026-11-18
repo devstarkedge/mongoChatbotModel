@@ -35,7 +35,7 @@ class ChatMessage(models.Model):
 
 
 
-# No Django models: data lives in MongoDB (see rag/services/embedding_store.py).
+# Business data lives in MongoDB, vectors/payloads live in Qdrant, and chat records use Django's database.
 # rag/models.py
 # from django.db import models
 

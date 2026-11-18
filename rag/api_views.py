@@ -23,10 +23,10 @@ def _error_response(exc):
     raise exc
 
 
-def _validate_user_token(request, user_id=None, email=None):
+def _validate_user_token(request, user_id=None, email=None, workspace_id=None, return_scope=False):
     authorization = request.headers.get("Authorization", "")
     if not authorization and not user_id:
-        return None
+        return (None, None) if return_scope else None
     if not settings.CHAT_JWT_SECRET:
         raise AuthError("Account-scoped chat requires JWT_SECRET to be configured.")
 
@@ -47,8 +47,9 @@ def _validate_user_token(request, user_id=None, email=None):
     token_email = claims.get("email")
     if email and token_email and email.strip().casefold() != str(token_email).strip().casefold():
         raise AuthError("The account token does not match the supplied email.")
-    authorization_service.resolve_scope(token_user_id, email=email or token_email)
-    return token_user_id
+    scope = authorization_service.resolve_scope(token_user_id, email=email or token_email,
+                                                workspace_id=workspace_id)
+    return (token_user_id, scope) if return_scope else token_user_id
 
 
 def _set_chat_owner(request, user_id):
@@ -67,7 +68,9 @@ class AskView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         try:
-            token_user_id = _validate_user_token(request, data.get("user_id"), data.get("email"))
+            token_user_id, resolved_scope = _validate_user_token(
+                request, data.get("user_id"), data.get("email"), data.get("workspace_id") or None,
+                return_scope=True)
             http_request = request._request
             _set_chat_owner(http_request, token_user_id)
             owner_id = get_chat_owner(http_request)
@@ -98,6 +101,8 @@ class AskView(APIView):
                 user_id=token_user_id or owner_id,
                 email=data.get("email") or None,
                 history=history,
+                workspace_id=data.get("workspace_id") or None,
+                resolved_scope=resolved_scope,
             )
             session = chat_memory.save_exchange(
                 http_request,
@@ -125,7 +130,9 @@ class SearchView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
         try:
-            token_user_id = _validate_user_token(request, data.get("user_id"), data.get("email"))
+            token_user_id, resolved_scope = _validate_user_token(
+                request, data.get("user_id"), data.get("email"), data.get("workspace_id") or None,
+                return_scope=True)
             _set_chat_owner(request._request, token_user_id)
             result = rag_service.search(
                 data["query"],
@@ -136,6 +143,8 @@ class SearchView(APIView):
                 hops=data.get("hops"),
                 user_id=token_user_id or get_chat_owner(request._request),
                 email=data.get("email") or None,
+                workspace_id=data.get("workspace_id") or None,
+                resolved_scope=resolved_scope,
             )
             return Response(result)
         except ChatbotError as exc:
@@ -225,8 +234,6 @@ class IngestView(APIView):
 
     def _authorize(self, request):
         token = settings.INGEST_TOKEN
-        if not token and settings.DEBUG:
-            return
         if not token:
             raise AuthError("Ingestion over HTTP is disabled. Configure the server-side ingest token.")
         supplied = request.headers.get("Authorization", "")

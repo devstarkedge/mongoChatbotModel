@@ -173,9 +173,13 @@ LOGGING = {
 # ----------------------------------------------------------------- MongoDB
 MONGO_URI = os.getenv("MONGO_URI", "")
 MONGO_DATABASE = os.getenv("MONGO_DATABASE", "")
-# Embeddings are stored in their own collection (optionally in a different database).
-EMBEDDINGS_COLLECTION = os.getenv("EMBEDDINGS_COLLECTION", "rag_embeddings")
-EMBEDDINGS_DATABASE = os.getenv("EMBEDDINGS_DATABASE", "")
+# Vector embeddings and chunk payloads live in Qdrant; MongoDB remains the source-data store.
+QDRANT_URL = os.getenv("QDRANT_URL", "")
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "")
+QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "rag_chunks")
+QDRANT_PATH = os.getenv("QDRANT_PATH", "")  # optional local embedded mode; leave empty for server/cloud
+QDRANT_TIMEOUT = max(10, _int("QDRANT_TIMEOUT", 60))
+QDRANT_UPSERT_BATCH_SIZE = max(10, min(500, _int("QDRANT_UPSERT_BATCH_SIZE", 100)))
 EXCLUDE_COLLECTIONS = _list("EXCLUDE_COLLECTIONS")
 # Collections that are never indexed, searched, planned against, or exposed by the RAG pipeline.
 # "activities" is always blocked in code as well (mongo_service.blocked_collections).
@@ -203,7 +207,8 @@ VECTOR_STORE_DIR = BASE_DIR / os.getenv("VECTOR_STORE_DIR", "vector_store")
 
 # ------------------------------------------------------------------ Search
 TOP_K = max(1, _int("TOP_K", 4 if _LOCAL else 5))
-MIN_SCORE = _float("MIN_SCORE", 0.15)              # min cosine similarity for vector hits
+# MIN_SCORE = _float("MIN_SCORE", 0.15)              # min cosine similarity for vector hits
+MIN_SCORE = _float("MIN_SCORE", 0.35)   
 HYBRID_SEARCH = _bool("HYBRID_SEARCH", True)       # vector + MongoDB $text keyword search
 KEYWORD_WEIGHT = _float("KEYWORD_WEIGHT", 0.5)
 RRF_K = _int("RRF_K", 60)
@@ -321,6 +326,8 @@ DEFAULT_COLLECTION_ALIASES = {
     "payments": "milestones",
     "holiday": "holidays",
     "holidays": "holidays",
+    "leaverequest": "leaverequests",
+    "leaverequests": "leaverequests",
     "column": "lists",
     "columns": "lists",
     "stage": "lists",
@@ -361,22 +368,50 @@ LLM_API_KEY = (os.getenv("LLM_API_KEY") or
                (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY", "") if _GEMINI else os.getenv("GROQ_API_KEY", "")))
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/" if _GEMINI
                          else "https://api.groq.com/openai/v1")
+
+
 LLM_MODEL = os.getenv("LLM_MODEL", "gemma3:4b" if _LOCAL else "gemini-3.5-flash-lite" if _GEMINI else "openai/gpt-oss-20b")
 LLM_TEMPERATURE = os.getenv("LLM_TEMPERATURE", "" if _GEMINI else "0")   # never sent to Gemini (deprecated there)   # empty = provider default
 LLM_TEMPERATURE = _float("LLM_TEMPERATURE", 0.0) if not _GEMINI else None
+
+
 # Name of the "maximum output tokens" request field. Gemini's OpenAI-compatible endpoint documents max_tokens.
 LLM_MAX_TOKENS_PARAM = os.getenv("LLM_MAX_TOKENS_PARAM", "max_tokens" if _GEMINI else "max_completion_tokens")
 LLM_MAX_TOKENS = _int("LLM_MAX_TOKENS", 600 if _LOCAL else 1500)
 LLM_TIMEOUT = _int("LLM_TIMEOUT", 180 if _LOCAL else 60)
+
+
 # --- Ollama (LLM_PROVIDER=ollama): talks to the native API, which can set the context window per request
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434").strip().rstrip("/")
 OLLAMA_NUM_CTX = _int("OLLAMA_NUM_CTX", 8192)          # tokens; Ollama's own default is smaller and silently cuts prompts
 OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "30m")   # keep the model in memory between questions
+
+
 # Speed: reasoning models (gpt-oss) "think" before answering. LLM_REASONING_EFFORT=low makes them much faster.
 # Leave empty if your provider does not support it (it is dropped automatically if the provider rejects it).
+
 LLM_REASONING_EFFORT = os.getenv("LLM_REASONING_EFFORT", "").strip()
 # Optional smaller/faster model just for the query-planning step of list/count questions.
+
 PLANNER_MODEL = os.getenv("PLANNER_MODEL", "").strip()
+
+
+# --- LLM fallback: if the primary provider cannot answer, retry on a second OpenAI-compatible provider.
+# Disabled unless LLM_FALLBACK_PROVIDER is set (openai | ollama). For Groq the key defaults to GROQ_API_KEY.
+
+
+LLM_FALLBACK_PROVIDER = os.getenv("LLM_FALLBACK_PROVIDER", "").strip().lower()   # "" disables the fallback
+LLM_FALLBACK_MODEL = os.getenv("LLM_FALLBACK_MODEL", "openai/gpt-oss-120b").strip()
+LLM_FALLBACK_BASE_URL = os.getenv(
+    "LLM_FALLBACK_BASE_URL",
+    "https://api.groq.com/openai/v1" if LLM_FALLBACK_PROVIDER == "openai" else "").strip()
+LLM_FALLBACK_API_KEY = (os.getenv("LLM_FALLBACK_API_KEY")
+                        or (os.getenv("GROQ_API_KEY", "") if LLM_FALLBACK_PROVIDER == "openai" else "")).strip()
+LLM_FALLBACK_MAX_TOKENS_PARAM = os.getenv("LLM_FALLBACK_MAX_TOKENS_PARAM", "max_tokens").strip()
+LLM_FALLBACK_TEMPERATURE = os.getenv("LLM_FALLBACK_TEMPERATURE", "0").strip()
+LLM_FALLBACK_TIMEOUT = _int("LLM_FALLBACK_TIMEOUT", LLM_TIMEOUT)
+
+
 
 # ------------------------------------------------------------------- Cache
 CACHE_TTL_SECONDS = _int("CACHE_TTL_SECONDS", 0)   # 0 disables the answer cache

@@ -16,6 +16,7 @@ from bson import ObjectId
 from django.test import Client, SimpleTestCase, override_settings
 from rest_framework.test import APIClient
 
+from rag.management.commands import seed_sample_data as seed
 from rag.management.commands.seed_sample_data import SAMPLE
 from rag.services import (authorization_service, document_converter, embedding_service, embedding_store,
                           ingestion_service, llm_service, mongo_service, rag_service, relationships, retrieval,
@@ -71,7 +72,8 @@ class MongoCase(SimpleTestCase):
         self.real_resolve_scope = authorization_service.resolve_scope
         self.scope_patch = patch.object(
             authorization_service, "resolve_scope",
-            side_effect=lambda user_id, email=None: self.real_resolve_scope(user_id or self.admin_id, email=email),
+            side_effect=lambda user_id, email=None, workspace_id=None: self.real_resolve_scope(
+            user_id or self.admin_id, email=email, workspace_id=workspace_id),
         )
         self.scope_patch.start()
         self.addCleanup(self.scope_patch.stop)
@@ -122,6 +124,15 @@ class PublicAccessTests(MongoCase):
         )
         self.assertEqual(response.status_code, 200, response.data)
         self.assertEqual(response.data["sources"], [])
+
+    def test_anonymous_logged_time_questions_are_denied_not_leaked(self):
+        self.ingest()
+        response = self.client.post(
+            "/api/v1/ask/", {"question": "Show logged time for ShopEase"}, format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["sources"], [])
+        self.assertIn("sign in", response.data["answer"].lower())
 
     @override_settings(CORS_ALLOWED_ORIGINS=["https://frontend.example"])
     def test_cors_allows_only_configured_browser_origins(self):
@@ -184,6 +195,14 @@ class PublicAccessTests(MongoCase):
         self.assertEqual(response.status_code, 202, response.data)
         self.assertEqual(response.data["id"], "test")
 
+    @override_settings(INGEST_TOKEN=None, DEBUG=True)
+    def test_ingestion_endpoint_stays_closed_without_a_token_even_in_debug(self):
+        response = self.client.get("/api/v1/ingest/")
+        self.assertEqual(response.status_code, 401, response.data)
+
+        response = self.client.post("/api/v1/ingest/", {"full": False}, format="json")
+        self.assertEqual(response.status_code, 401, response.data)
+
 
 def _global_scope_for_test(user_id):
     """Exercise legacy global-query behavior without granting it to real accounts."""
@@ -197,12 +216,12 @@ class ConverterTests(SimpleTestCase):
         from datetime import datetime
         oid = ObjectId()
         doc = {"_id": ObjectId(), "name": "Ann", "tags": ["a", "b"], "active": True,
-               "joined": datetime(2026, 8, 12, 6, 38), "owner": oid,
+               "joined": datetime(2026, 8, 12, 6, 38), "parent": oid,
                "address": {"city": "Paris", "geo": {"lat": 1.5}},
                "password": "secret", "empty": "", "blob": b"x", "items": [{"sku": "A1"}, {"sku": "B2"}]}
         text = "\n".join(document_converter.convert_document("people", doc).lines)
         for expected in ("Name: Ann", "Tags: a, b", "Active: Yes", "Joined: August 12, 2026 06:38 UTC",
-                         f"Owner ID: {oid}", "Address City: Paris", "Address Geo Lat: 1.5",
+                         f"Parent ID: {oid}", "Address City: Paris", "Address Geo Lat: 1.5",
                          "Items 1 Sku: A1", "Items 2 Sku: B2"):
             self.assertIn(expected, text)
         for missing in ("secret", "Password", "Empty", "Blob"):
@@ -315,11 +334,133 @@ class IngestionTests(MongoCase):
         self.ingest()
         self.assertNotIn("rag_embeddings", ingestion_service.mongo_service.list_collections())
 
+    def test_embeddings_are_tagged_with_workspace_ids(self):
+        ws_a, ws_b = ObjectId(), ObjectId()
+        project_a, project_b = ObjectId(), ObjectId()
+        board_a = ObjectId()
+        self.db["workspaces"].insert_many([
+            {"_id": ws_a, "name": "Acme"}, {"_id": ws_b, "name": "Beta"}])
+        self.db["projects"].insert_many([
+            {"_id": project_a, "project": "Alpha", "workspaceId": ws_a},
+            {"_id": project_b, "project": "Gamma", "workspaceId": ws_b},
+        ])
+        self.db["boards"].insert_one({"_id": board_a, "name": "ShopEase", "project": project_a})
+        self.db["cards"].insert_many([
+            {"_id": ObjectId(), "title": "Via board", "board": board_a},
+            {"_id": ObjectId(), "title": "Direct", "workspaceId": ws_b},
+        ])
+        self.db["tasks"].insert_one({"_id": ObjectId(), "title": "Fix", "projectId": project_a})
+        member = ObjectId()
+        self.db["users"].insert_many([
+            {"_id": member, "name": "Ravi", "lastActiveWorkspace": ws_a},
+            {"_id": ObjectId(), "name": "NoWorkspace"},
+        ])
+        self.db["memberships"].insert_one({"user": member, "workspace": ws_b, "status": "active"})
+
+        self.ingest()
+
+        # direct field on the source document
+        self.assertEqual(self.emb("projects", {"metadata.primary_id": str(project_a)})["metadata"]["workspace_ids"],
+                         [str(ws_a)])
+        # one hop: cards -> board -> project -> workspace
+        self.assertEqual(self.emb("boards", {"metadata.primary_id": str(board_a)})["metadata"]["workspace_ids"],
+                         [str(ws_a)])
+        # direct field wins over the board chain
+        direct_card = self.db["cards"].find_one({"title": "Direct"})
+        self.assertEqual(self.emb("cards", {"metadata.primary_id": str(direct_card["_id"])})["metadata"]["workspace_ids"],
+                         [str(ws_b)])
+        # tasks -> project -> workspace
+        task = self.db["tasks"].find_one({"title": "Fix"})
+        self.assertEqual(self.emb("tasks", {"metadata.primary_id": str(task["_id"])})["metadata"]["workspace_ids"],
+                         [str(ws_a)])
+        # workspaces belong to themselves
+        self.assertEqual(self.emb("workspaces", {"metadata.primary_id": str(ws_a)})["metadata"]["workspace_ids"],
+                         [str(ws_a)])
+        # users: direct field + every membership workspace
+        self.assertEqual(self.emb("users", {"metadata.primary_id": str(member)})["metadata"]["workspace_ids"],
+                         [str(ws_a), str(ws_b)])
+        loose = self.db["users"].find_one({"name": "NoWorkspace"})
+        self.assertNotIn("workspace_ids", self.emb("users", {"metadata.primary_id": str(loose["_id"])})["metadata"])
+
+    def test_workspace_metadata_updates_without_reembedding(self):
+        ws = ObjectId()
+        self.db["workspaces"].insert_one({"_id": ws, "name": "Acme"})
+        project = ObjectId()
+        self.db["projects"].insert_one({"_id": project, "project": "Alpha", "createdBy": ObjectId()})
+        self.ingest()
+        self.assertNotIn("workspace_ids", self.emb("projects", {"metadata.primary_id": str(project)})["metadata"])
+
+        self.db["projects"].update_one({"_id": project}, {"$set": {"workspaceId": ws}})
+        summary = self.ingest()
+        stats = summary["collections"]["projects"]
+        self.assertGreater(stats["unchanged"], 0)
+        self.assertEqual(self.emb("projects", {"metadata.primary_id": str(project)})["metadata"]["workspace_ids"],
+                         [str(ws)])
+
+
+class WorkspaceScopeTests(MongoCase):
+    """workspace_id on a request restricts retrieval to one workspace (fail closed)."""
+
+    def setUp(self):
+        super().setUp()
+        self.ingest()                     # SAMPLE data is fully workspace-linked
+        self.acme = str(seed.WS_ACME)
+        self.beta = str(seed.WS_BETA)
+        self.aisha = str(seed.U_AISHA)
+
+    def test_unknown_workspace_is_rejected(self):
+        with self.assertRaises(InvalidRequestError):
+            self.real_resolve_scope(self.admin_id, workspace_id="no-such-workspace")
+
+    def test_malformed_workspace_id_is_rejected(self):
+        with self.assertRaises(InvalidRequestError):
+            self.real_resolve_scope(self.admin_id, workspace_id="bad id with spaces")
+
+    def test_employee_may_scope_to_their_own_workspace(self):
+        scope = self.real_resolve_scope(self.aisha, workspace_id=self.acme)
+        self.assertEqual(scope.workspace_id, self.acme)
+        self.assertTrue(scope.embedding_ids)
+        for doc_id in scope.embedding_ids:
+            doc = self.db["rag_embeddings"].find_one({"_id": doc_id}, {"metadata.workspace_ids": 1})
+            self.assertIn(self.acme, doc["metadata"].get("workspace_ids") or [],
+                          f"{doc_id} is not tagged with the requested workspace")
+
+    def test_employee_is_denied_workspaces_they_are_not_a_member_of(self):
+        with self.assertRaises(AuthorizationError):
+            self.real_resolve_scope(self.aisha, workspace_id=self.beta)
+
+    def test_admin_without_workspace_keeps_full_access(self):
+        scope = self.real_resolve_scope(self.admin_id)
+        self.assertIsNone(scope.workspace_id)
+        self.assertIsNone(scope.embedding_ids)
+
+    def test_admin_workspace_scope_limits_embeddings(self):
+        scope = self.real_resolve_scope(self.admin_id, workspace_id=self.acme)
+        self.assertEqual(scope.workspace_id, self.acme)
+        self.assertTrue(scope.embedding_ids)
+        for doc_id in scope.embedding_ids:
+            doc = self.db["rag_embeddings"].find_one({"_id": doc_id}, {"metadata.workspace_ids": 1})
+            self.assertIn(self.acme, doc["metadata"].get("workspace_ids") or [],
+                          f"{doc_id} is not tagged with the requested workspace")
+        shop = self.db["rag_embeddings"].find_one({"metadata.primary_id": str(seed.P_SHOP)})
+        self.assertNotIn(shop["_id"], scope.embedding_ids)
+
 
 class SearchTests(MongoCase):
     def setUp(self):
         super().setUp()
         self.ingest()
+
+    def test_workspace_scope_limits_admin_search(self):
+        result = rag_service.search("Health4Travel completed", top_k=15, user_id=self.admin_id,
+                                    workspace_id=str(seed.WS_ACME))
+        names = [r["name"] for r in result["results"]]
+        self.assertIn("Health4Travel", names)
+        self.assertNotIn("ShopEase", names)
+        self.assertNotIn("Beta Labs", names)
+        # without a workspace the admin still sees everything
+        unscoped = rag_service.search("ShopEase", top_k=15, user_id=self.admin_id)
+        self.assertTrue(any(r["name"] == "ShopEase" for r in unscoped["results"]))
 
     def test_vector_search_finds_the_right_record(self):
         hits = retrieval.search("Health4Travel completed", top_k=3, hybrid=False)
@@ -351,9 +492,10 @@ class SearchTests(MongoCase):
         self.assertEqual(loaded.ids, index.ids)
         self.assertEqual(loaded.collections, index.collections)
 
-    def test_legacy_index_metadata_triggers_hnsw_rebuild(self):
+    def test_legacy_index_metadata_is_refused_not_rebuilt_in_request(self):
         from django.conf import settings
         from pathlib import Path
+        from rag.services.exceptions import VectorStoreError
 
         metadata_path = Path(settings.VECTOR_STORE_DIR) / vector_index.META_FILE
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -361,10 +503,27 @@ class SearchTests(MongoCase):
         metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
         vector_index.reset_for_tests()
 
-        rebuilt = vector_index.get_index()
-        self.assertTrue(hasattr(rebuilt.index, "hnsw"))
-        self.assertEqual(json.loads(metadata_path.read_text(encoding="utf-8"))["backend"],
-                         vector_index.BACKEND)
+        with self.assertRaises(VectorStoreError):
+            vector_index.get_index()
+        # a request must never rewrite the index files; only ingestion rebuilds
+        self.assertIsNone(json.loads(metadata_path.read_text(encoding="utf-8")).get("backend"))
+
+    def test_missing_index_files_are_never_rebuilt_by_a_chat_request(self):
+        from django.conf import settings
+        from pathlib import Path
+        from rag.services.exceptions import VectorStoreError
+
+        store = Path(settings.VECTOR_STORE_DIR)
+        for name in (vector_index.INDEX_FILE, vector_index.META_FILE):
+            (store / name).unlink(missing_ok=True)
+        vector_index.reset_for_tests()
+
+        # embeddings still exist, but a request must not trigger a full rebuild
+        self.assertGreater(vector_index.embedding_store.count(), 0)
+        with self.assertRaises(VectorStoreError):
+            vector_index.get_index()
+        self.assertFalse((store / vector_index.INDEX_FILE).exists())
+        self.assertFalse((store / vector_index.META_FILE).exists())
 
     def test_keyword_failure_falls_back_to_vector_search(self):
         hits = retrieval.search("Health4Travel completed", top_k=3, hybrid=True)  # mongomock has no $text
@@ -576,7 +735,7 @@ class AskTests(MongoCase):
         super().setUp()
         scope_patch = patch.object(
             authorization_service, "resolve_scope",
-            side_effect=lambda user_id, email=None: _global_scope_for_test(user_id or self.admin_id),
+            side_effect=lambda user_id, email=None, workspace_id=None: _global_scope_for_test(user_id or self.admin_id),
         )
         scope_patch.start()
         self.addCleanup(scope_patch.stop)
@@ -739,7 +898,7 @@ class AskTests(MongoCase):
         with patch.object(structured_query, "try_structured", return_value=exact) as query, \
                 patch.object(llm_service, "generate", return_value="ShopEase is listed.") as gen, \
                 patch.object(authorization_service, "resolve_scope",
-                             side_effect=lambda user_id, email=None: _global_scope_for_test(user_id or self.admin_id)):
+                             side_effect=lambda user_id, email=None, workspace_id=None: _global_scope_for_test(user_id or self.admin_id)):
             rag_service.ask("List all projects")
             repeated = rag_service.ask(" list all projects ")
 
@@ -1103,7 +1262,7 @@ class StructuredQueryTests(MongoCase):
         super().setUp()
         scope_patch = patch.object(
             authorization_service, "resolve_scope",
-            side_effect=lambda user_id, email=None: _global_scope_for_test(user_id or self.admin_id),
+            side_effect=lambda user_id, email=None, workspace_id=None: _global_scope_for_test(user_id or self.admin_id),
         )
         scope_patch.start()
         self.addCleanup(scope_patch.stop)
@@ -1496,6 +1655,64 @@ class StructuredQueryTests(MongoCase):
         self.assertIn("Dev Lead", exact.direct_answer)
         self.assertIn("lead@example.com", exact.direct_answer)
 
+    def test_person_lookup_with_duplicate_names_asks_which_one(self):
+        self.db["users"].insert_many([
+            {"name": "Mohit Gahlyan", "email": "mohit.k@example.com", "role": "employee"},
+            {"name": "Mohit Thakur", "email": "mohit.thakur@example.com", "role": "employee"},
+        ])
+        result, gen = self.ask("who is mohit", user_id=self.admin_id)
+        gen.assert_not_called()
+        self.assertEqual(result["total_matching"], 2)
+        self.assertIn("2 people matching", result["answer"])
+        self.assertIn("Mohit Gahlyan", result["answer"])
+        self.assertIn("Mohit Thakur", result["answer"])
+        self.assertIn("mohit.k@example.com", result["answer"])
+        self.assertIn("mohit.thakur@example.com", result["answer"])
+
+    def test_restrict_unscoped_blocks_unscoped_answers_for_non_admins(self):
+        ws_id = ObjectId()
+        self.db["workspaces"].insert_one({"_id": ws_id, "name": "FlowTask Inc"})
+        self.db["users"].insert_one({
+            "name": "Dev User", "email": "dev.user@example.com", "role": "developer",
+            "lastActiveWorkspace": ws_id
+        })
+        self.db["boards"].insert_many([
+            {"_id": ObjectId(), "name": "ShopEase"},
+            {"_id": ObjectId(), "name": "Blog"},
+        ])
+        questions = ("Dev User's email", "what is Dev User's workspace", "who is Dev User", "list boards")
+        for question in questions:
+            with patch.object(llm_service, "plan_query", return_value=None):
+                restricted = structured_query.try_structured(
+                    question, current_user_id="emp-1", is_admin=False, restrict_unscoped=True)
+                self.assertIsNone(restricted, question)
+
+                admin = structured_query.try_structured(
+                    question, current_user_id="emp-1", is_admin=True, restrict_unscoped=True)
+                self.assertIsNotNone(admin, question)
+
+    def test_restrict_unscoped_still_allows_scoped_logged_time_for_employees(self):
+        employee = self.db["users"].find_one({"email": "aisha@example.com"})
+        frontend = ObjectId()
+        self.db["boards"].insert_one({"_id": frontend, "name": "Frontend team"})
+        self.db["cards"].insert_one({
+            "title": "Task A", "board": frontend, "status": "todo",
+            "loggedTime": [{"user": employee["_id"], "hours": 2, "minutes": 30,
+                            "date": "2026-01-02", "description": "did stuff"}],
+        })
+        result = structured_query.try_structured(
+            "What is my most logged time in frontend team?",
+            current_user_id=str(employee["_id"]), is_admin=False, restrict_unscoped=True)
+        self.assertIsNotNone(result)
+        self.assertIn("did stuff", result.direct_answer)
+
+        other = structured_query.try_structured(
+            "Show logged time of Aisha Khan",
+            current_user_id="emp-other", is_admin=False, restrict_unscoped=True)
+        self.assertIsNotNone(other)
+        self.assertEqual(other.total, 0)
+        self.assertIn("not authorized", other.direct_answer.lower())
+
 
 class LoggedTimeTests(MongoCase):
     """Logged-time questions always read nested `loggedTime` entries on 'cards', completely."""
@@ -1504,7 +1721,7 @@ class LoggedTimeTests(MongoCase):
         super().setUp()
         scope_patch = patch.object(
             authorization_service, "resolve_scope",
-            side_effect=lambda user_id, email=None: _global_scope_for_test(user_id or self.admin_id),
+            side_effect=lambda user_id, email=None, workspace_id=None: _global_scope_for_test(user_id or self.admin_id),
         )
         scope_patch.start()
         self.addCleanup(scope_patch.stop)
@@ -1593,6 +1810,24 @@ class LoggedTimeTests(MongoCase):
         types = structured_query._leave_types_answer("what leave types are there")
         self.assertIn("Full Leave", types.direct_answer)
         self.assertNotIn("Short Leave", types.direct_answer)
+
+    def test_unverified_callers_cannot_read_logged_time_or_leave_data(self):
+        denied = structured_query._logged_time_answer("Show logged time of Aisha Khan")
+        self.assertIsNotNone(denied)
+        self.assertEqual(denied.total, 0)
+        self.assertEqual(denied.records, [])
+        self.assertIn("sign in", denied.direct_answer.lower())
+
+        denied_own = structured_query._logged_time_answer("Show my logged time")
+        self.assertIsNotNone(denied_own)
+        self.assertEqual(denied_own.total, 0)
+        self.assertIn("sign in", denied_own.direct_answer.lower())
+
+        denied_leave = structured_query._leave_time_answer("Show full leave logged time of Aisha Khan")
+        self.assertIsNotNone(denied_leave)
+        self.assertEqual(denied_leave.total, 0)
+        self.assertEqual(denied_leave.records, [])
+        self.assertIn("sign in", denied_leave.direct_answer.lower())
 
     def test_project_scope_only_returns_that_board(self):
         result, search, _, generate = self.ask("Show logged time for ShopEase")
@@ -2177,6 +2412,34 @@ class LoggedTimeTests(MongoCase):
         search.assert_not_called()
 
 
+class CompanyIdentityPrivacyTests(MongoCase):
+    """Only admins may look up another member's company/workspace."""
+
+    def test_other_members_company_is_denied_for_non_admins(self):
+        admin = authorization_service.AccessScope(
+            "admin-1", True, None, "k1", "o1", user_name="Meera Admin", user_company="Acme")
+        employee = authorization_service.AccessScope(
+            "emp-1", False, frozenset(), "k2", "o2", user_name="Rohan Mehta", user_company="Acme")
+
+        self.assertEqual(
+            rag_service.check_company_identity("What is my company?", employee),
+            "Your company is Acme.",
+        )
+        self.assertEqual(
+            rag_service.check_company_identity("What is Rohan Mehta's company?", employee),
+            "Rohan Mehta's company is Acme.",
+        )
+
+        for question in ("What is Aisha's company?", "Company name of Aisha Khan"):
+            answer = rag_service.check_company_identity(question, employee)
+            self.assertIn("not authorized", answer.lower())
+
+        for question in ("What is Aisha's company?", "Company name of Aisha Khan"):
+            answer = rag_service.check_company_identity(question, admin)
+            self.assertIsNotNone(answer)
+            self.assertNotIn("not authorized", answer.lower())
+
+
 @override_settings(STRUCT_PLANNER="on")
 
 class SpeedAndResilienceTests(MongoCase):
@@ -2188,7 +2451,7 @@ class SpeedAndResilienceTests(MongoCase):
         super().setUp()
         scope_patch = patch.object(
             authorization_service, "resolve_scope",
-            side_effect=lambda user_id, email=None: _global_scope_for_test(user_id or self.admin_id),
+            side_effect=lambda user_id, email=None, workspace_id=None: _global_scope_for_test(user_id or self.admin_id),
         )
         scope_patch.start()
         self.addCleanup(scope_patch.stop)
@@ -2363,12 +2626,46 @@ class LlmErrorMessageTests(SimpleTestCase):
         self.assertEqual(seen, ["small-fast", "big-slow"])
 
 
+class SelfIdentityGuardTests(SimpleTestCase):
+    """Identity questions must answer from the verified account, never from records or the LLM."""
+
+    def scope(self, **overrides):
+        values = dict(user_id="u1", is_admin=False, embedding_ids=None, cache_key="u1:cache",
+                      chat_owner_id="u1:chat", user_name="Alpha",
+                      user_email="testadd@example.com", user_role="admin")
+        values.update(overrides)
+        return authorization_service.AccessScope(**values)
+
+    def test_identity_answer_comes_from_the_account_not_from_records(self):
+        # A record that names another person must never become the user's identity.
+        with patch.object(authorization_service, "resolve_scope", return_value=self.scope()), \
+             patch.object(llm_service, "generate", side_effect=AssertionError("LLM must not be called")), \
+             patch.object(retrieval, "search", side_effect=AssertionError("retrieval must not run")):
+            result = rag_service.ask("who i am")
+        self.assertEqual(result["mode"], "self_identity")
+        self.assertIn("Alpha", result["answer"])
+        self.assertIn("testadd@example.com", result["answer"])
+        self.assertNotIn("Priyanka", result["answer"])
+
+    def test_guest_identity_question_gets_a_safe_answer_not_a_guess(self):
+        with patch.object(llm_service, "generate", side_effect=AssertionError("LLM must not be called")), \
+             patch.object(retrieval, "search", side_effect=AssertionError("retrieval must not run")):
+            result = rag_service.ask("who am i", user_id="guest:abc")
+        self.assertEqual(result["mode"], "self_identity")
+        self.assertIn("can't confirm your identity", result["answer"].lower())
+
+    def test_prompts_forbid_identity_inference_from_records(self):
+        rule = "The questioner's identity is not in the records."
+        self.assertIn(rule, llm_service.SYSTEM_PROMPT)
+        self.assertIn(rule, llm_service.SYSTEM_PROMPT_COMPACT)
+
+
 # =============================================================== Ollama (local model)
 import httpx  # noqa: E402
 
 OLLAMA = dict(LLM_PROVIDER="ollama", LLM_MODEL="gemma3:4b", OLLAMA_HOST="http://ollama.test:11434",
               OLLAMA_NUM_CTX=8192, OLLAMA_KEEP_ALIVE="30m", LLM_TIMEOUT=30, LLM_TEMPERATURE="0",
-              LLM_MAX_TOKENS=600, LLM_API_KEY="")
+              LLM_MAX_TOKENS=600, LLM_API_KEY="", LLM_FALLBACK_PROVIDER="")
 
 
 def fake_ollama(handler):
@@ -2498,7 +2795,7 @@ class OllamaEndToEndTests(MongoCase):
         super().setUp()
         scope_patch = patch.object(
             authorization_service, "resolve_scope",
-            side_effect=lambda user_id, email=None: _global_scope_for_test(user_id or self.admin_id),
+            side_effect=lambda user_id, email=None, workspace_id=None: _global_scope_for_test(user_id or self.admin_id),
         )
         scope_patch.start()
         self.addCleanup(scope_patch.stop)
@@ -2572,7 +2869,8 @@ from django.core.management.base import CommandError  # noqa: E402
 
 GEMINI = dict(LLM_PROVIDER="gemini", LLM_MODEL="gemini-3.5-flash-lite", LLM_API_KEY="SECRET-KEY-123",
               LLM_BASE_URL="https://generativelanguage.googleapis.com/v1beta/openai/", LLM_TEMPERATURE="0",
-              LLM_MAX_TOKENS_PARAM="max_tokens", LLM_REASONING_EFFORT="", LLM_MAX_TOKENS=600, STRUCT_PLANNER="on")
+              LLM_MAX_TOKENS_PARAM="max_tokens", LLM_REASONING_EFFORT="", LLM_MAX_TOKENS=600, STRUCT_PLANNER="on",
+              LLM_FALLBACK_PROVIDER="")
 
 
 def fake_openai_client(content="ok", finish_reason="stop", error=None, seen=None):
@@ -2746,3 +3044,70 @@ class GeminiEndToEndTests(MongoCase):
         with patch.object(llm_service, "_get_client", return_value=client), self.assertRaises(ConfigError) as cm:
             rag_service.ask("give me list of all departments")
         self.assertIn("rejected by generativelanguage.googleapis.com", cm.exception.message)
+
+
+@override_settings(
+    LLM_PROVIDER="gemini", LLM_MODEL="gemini-3.5-flash-lite", LLM_API_KEY="PRIMARY-KEY",
+    LLM_BASE_URL="https://generativelanguage.googleapis.com/v1beta/openai/",
+    LLM_TEMPERATURE="0", LLM_MAX_TOKENS_PARAM="max_tokens", LLM_REASONING_EFFORT="",
+    LLM_FALLBACK_PROVIDER="openai", LLM_FALLBACK_MODEL="openai/gpt-oss-120b",
+    LLM_FALLBACK_API_KEY="FALLBACK-KEY", LLM_FALLBACK_BASE_URL="https://api.groq.com/openai/v1",
+    LLM_FALLBACK_MAX_TOKENS_PARAM="max_tokens", LLM_FALLBACK_TEMPERATURE="0", LLM_FALLBACK_TIMEOUT=60,
+)
+class LlmProviderFallbackTests(SimpleTestCase):
+    """When the primary provider fails for a transient reason, retry on the configured fallback."""
+
+    def routed_client(self, primary, fallback):
+        def get_client(api_key=None, base_url=None, timeout=None):
+            return fallback if base_url == "https://api.groq.com/openai/v1" else primary
+        return get_client
+
+    def test_primary_outage_is_answered_by_the_fallback(self):
+        seen = []
+        primary = fake_openai_client(error=provider_error("InternalServerError", 503))
+        fallback = fake_openai_client("Groq answer", seen=seen)
+        with patch.object(llm_service, "_get_client", side_effect=self.routed_client(primary, fallback)):
+            self.assertEqual(llm_service.generate("q", "ctx"), "Groq answer")
+        self.assertEqual(seen[0]["model"], "openai/gpt-oss-120b")
+        self.assertIn("max_tokens", seen[0])
+        self.assertEqual(seen[0]["temperature"], 0.0)
+
+    def test_geo_blocked_primary_falls_back(self):
+        geo = provider_error("BadRequestError", 400, "User location is not supported for the API use.")
+        primary = fake_openai_client(error=geo)
+        fallback = fake_openai_client("ok")
+        with patch.object(llm_service, "_get_client", side_effect=self.routed_client(primary, fallback)):
+            self.assertEqual(llm_service.generate("q", "ctx"), "ok")
+
+    def test_config_errors_are_not_sent_to_the_fallback(self):
+        from rag.services.exceptions import ConfigError
+        calls = []
+
+        def get_client(api_key=None, base_url=None, timeout=None):
+            calls.append(base_url)
+            return fake_openai_client(error=provider_error("BadRequestError", 400, "API key not valid"))
+
+        with patch.object(llm_service, "_get_client", side_effect=get_client), self.assertRaises(ConfigError):
+            llm_service.generate("q", "ctx")
+        self.assertEqual(calls, ["https://generativelanguage.googleapis.com/v1beta/openai/"])
+
+    def test_when_both_fail_the_primary_error_is_reported(self):
+        from rag.services.exceptions import LLMError
+
+        def get_client(api_key=None, base_url=None, timeout=None):
+            return fake_openai_client(error=provider_error("InternalServerError", 503))
+
+        with patch.object(llm_service, "_get_client", side_effect=get_client), self.assertRaises(LLMError) as cm:
+            llm_service.generate("q", "ctx")
+        self.assertIn("temporary problem (HTTP 503)", cm.exception.message)
+
+    def test_disabling_the_fallback_keeps_the_primary_behaviour(self):
+        from rag.services.exceptions import LLMError
+
+        def get_client(api_key=None, base_url=None, timeout=None):
+            return fake_openai_client(error=provider_error("InternalServerError", 503))
+
+        with override_settings(LLM_FALLBACK_PROVIDER=""), \
+             patch.object(llm_service, "_get_client", side_effect=get_client), \
+             self.assertRaises(LLMError):
+            llm_service.generate("q", "ctx")

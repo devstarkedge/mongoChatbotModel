@@ -1,168 +1,504 @@
-"""
-The embeddings collection in MongoDB: the single source of truth.
-
-    {
-      _id: "projects:65a...:0",            # collection:document_id:chunk  (deterministic)
-      embedding: [0.01, ...],              # normalised vector
-      text: "Collection: projects\nProject: ...",
-      metadata: {collection, primary_id, chunk_index, chunk_count, field_names,
-                 reference_ids, display_name, content_hash, model, indexed_at},
-      relationships: [{field, ref_id, ref_collection, ref_name}]
-    }
-
-Text, metadata, relationships and the vector live in ONE document, so they can never drift apart.
-The FAISS HNSW index (vector_index.py) is rebuilt from this collection.
-"""
+"""Qdrant storage for vectors and their searchable chunk payloads."""
 import logging
-from datetime import datetime, timezone
+import threading
+import time
+import uuid
+from datetime import date, datetime, timezone
 
 import numpy as np
 from django.conf import settings
-from pymongo import ReplaceOne
-from pymongo.errors import PyMongoError
 
-from . import mongo_service
-from .exceptions import MongoServiceError
+from .exceptions import ConfigError, VectorStoreError
 
 logger = logging.getLogger(__name__)
-NO_VECTOR = {"embedding": 0}
+_client = None
+_lock = threading.RLock()
+_COLLECTION = None
 
 
-def collection():
-    return mongo_service.get_embeddings_collection()
+def _qdrant():
+    global _client
+    if _client is None:
+        with _lock:
+            if _client is None:
+                try:
+                    from qdrant_client import QdrantClient
+                    url = (getattr(settings, "QDRANT_URL", "") or "").strip()
+                    path = (getattr(settings, "QDRANT_PATH", "") or "").strip()
+                    if path:
+                        _client = QdrantClient(path=path)
+                    elif url:
+                        _client = QdrantClient(url=url, api_key=getattr(settings, "QDRANT_API_KEY", "") or None,
+                                               timeout=getattr(settings, "QDRANT_TIMEOUT", 10))
+                    else:
+                        raise ConfigError("Set QDRANT_URL (or QDRANT_PATH for local development).")
+                except ImportError as exc:
+                    raise VectorStoreError("Qdrant client is missing. Install requirements.txt.") from exc
+                except ConfigError:
+                    raise
+                except Exception as exc:
+                    logger.exception("Could not connect to Qdrant")
+                    raise VectorStoreError("Could not connect to Qdrant. Check QDRANT_URL and credentials.") from exc
+    return _client
 
 
-def ensure_indexes():
-    c = collection()
+def _name():
+    return getattr(settings, "QDRANT_COLLECTION", "rag_chunks")
+
+
+def _point_id(embedding_id):
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, str(embedding_id)))
+
+
+def _revision_point_id():
+    return _point_id(f"{_name()}:revision")
+
+
+def _json_safe(value):
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items() if v is not None}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def ensure_collection(dimension=None):
+    """Ensure the Qdrant collection exists and its vector size matches the embedding model."""
+    from qdrant_client import models
+    client = _qdrant()
+    name = _name()
     try:
-        c.create_index("metadata.collection")
-        c.create_index("relationships.ref_id")
-        c.create_index([("text", "text")], name="text_search")   # powers keyword (hybrid) search
+        if not client.collection_exists(name):
+            if dimension is None:
+                return False
+            client.create_collection(collection_name=name, vectors_config=models.VectorParams(
+                size=int(dimension), distance=models.Distance.COSINE))
+            for field, schema in (("metadata.collection", models.PayloadSchemaType.KEYWORD),
+                                  ("metadata.workspace_ids", models.PayloadSchemaType.KEYWORD),
+                                  ("metadata.model", models.PayloadSchemaType.KEYWORD),
+                                  ("metadata.primary_id", models.PayloadSchemaType.KEYWORD),
+                                  ("embedding_id", models.PayloadSchemaType.KEYWORD),
+                                  ("kind", models.PayloadSchemaType.KEYWORD),
+                                  ("relationships[].ref_collection", models.PayloadSchemaType.KEYWORD),
+                                  ("relationships[].ref_id", models.PayloadSchemaType.KEYWORD),
+                                  ("text", models.TextIndexParams(
+                                      type="text", tokenizer=models.TokenizerType.WORD,
+                                      min_token_len=2, max_token_len=30, lowercase=True))):
+                client.create_payload_index(collection_name=name, field_name=field, field_schema=schema,
+                                            wait=True)
+            return True
+        info = client.get_collection(name)
+        size = getattr(getattr(info.config.params, "vectors", None), "size", None)
+        if dimension is not None and size is not None and int(size) != int(dimension):
+            raise VectorStoreError(f"Qdrant collection '{name}' uses {size}-dimensional vectors; "
+                                   f"the configured model creates {dimension}. Re-ingest with a new collection.")
+        return True
+    except VectorStoreError:
+        raise
     except Exception as exc:
-        logger.warning("Could not create all indexes: %s", exc)
+        logger.exception("Could not prepare Qdrant collection")
+        raise VectorStoreError("Could not prepare the Qdrant collection.") from exc
+
+
+_indexes_checked = False
+_index_lock = threading.Lock()
+
+
+def reset_indexes_checked():
+    global _indexes_checked
+    _indexes_checked = False
+
+
+def ensure_indexes(force: bool = False):
+    """Ensure all required payload indexes exist on the Qdrant collection (self-healing)."""
+    global _indexes_checked
+    if _indexes_checked and not force:
+        return
+    with _index_lock:
+        if _indexes_checked and not force:
+            return
+        if not ensure_collection():
+            return
+        from qdrant_client import models
+        client = _qdrant()
+        name = _name()
+        try:
+            info = client.get_collection(name)
+            existing_schemas = info.payload_schema or {}
+        except Exception as exc:
+            logger.warning("Could not inspect Qdrant payload schema for %s: %s", name, exc)
+            existing_schemas = {}
+
+        required_keywords = (
+            "metadata.collection",
+            "metadata.workspace_ids",
+            "metadata.model",
+            "metadata.primary_id",
+            "embedding_id",
+            "kind",
+            "relationships[].ref_collection",
+            "relationships[].ref_id",
+        )
+        for field in required_keywords:
+            if field not in existing_schemas:
+                try:
+                    logger.info("Self-healing Qdrant index: creating index for %s", field)
+                    client.create_payload_index(collection_name=name, field_name=field,
+                                                field_schema=models.PayloadSchemaType.KEYWORD, wait=True)
+                except Exception as exc:
+                    logger.warning("Could not ensure Qdrant payload index for %s (%s)", field, type(exc).__name__)
+
+        if "metadata.chunk_index" not in existing_schemas:
+            try:
+                logger.info("Self-healing Qdrant index: creating index for metadata.chunk_index (integer)")
+                client.create_payload_index(collection_name=name, field_name="metadata.chunk_index",
+                                            field_schema=models.PayloadSchemaType.INTEGER, wait=True)
+            except Exception as exc:
+                logger.warning("Could not ensure Qdrant payload index for metadata.chunk_index (%s)", type(exc).__name__)
+
+        if "text" not in existing_schemas:
+            try:
+                logger.info("Self-healing Qdrant index: creating text index")
+                client.create_payload_index(collection_name=name, field_name="text",
+                                            field_schema=models.TextIndexParams(
+                                                type="text", tokenizer=models.TokenizerType.WORD,
+                                                min_token_len=2, max_token_len=30, lowercase=True),
+                                            wait=True)
+            except Exception as exc:
+                logger.warning("Could not ensure Qdrant text payload index: %s", exc)
+
+        _indexes_checked = True
+
+
+def count():
+    if not ensure_collection():
+        return 0
+    try:
+        from qdrant_client import models
+        flt = models.Filter(must=[models.FieldCondition(key="kind", match=models.MatchValue(value="chunk"))])
+        return int(_qdrant().count(collection_name=_name(), count_filter=flt, exact=True).count)
+    except Exception as exc:
+        raise VectorStoreError("Could not count Qdrant vectors.") from exc
 
 
 def upsert_many(records: list, vectors: np.ndarray):
-    """Insert or replace records together with their vectors."""
-    now = datetime.now(timezone.utc)
-    ops = []
+    from qdrant_client import models
+    if not records:
+        return
+    ensure_collection(vectors.shape[1])
+    points = []
     for record, vector in zip(records, vectors):
-        doc = dict(record)
-        doc["metadata"] = {**record["metadata"], "model": settings.EMBEDDING_MODEL_ID, "indexed_at": now}
-        doc["embedding"] = [float(x) for x in vector]
-        ops.append(ReplaceOne({"_id": doc["_id"]}, doc, upsert=True))
+        payload = {key: _json_safe(value) for key, value in record.items() if key != "_id"}
+        metadata = payload.setdefault("metadata", {})
+        metadata["model"] = settings.EMBEDDING_MODEL_ID
+        metadata["indexed_at"] = datetime.now(timezone.utc).isoformat()
+        payload["embedding_id"] = record["_id"]
+        payload["kind"] = "chunk"
+        points.append(models.PointStruct(id=_point_id(record["_id"]), vector=vector.tolist(), payload=payload))
     try:
-        for start in range(0, len(ops), 500):
-            collection().bulk_write(ops[start:start + 500], ordered=False)
-    except PyMongoError as exc:
-        logger.error("Saving embeddings failed: %s", type(exc).__name__)
-        raise MongoServiceError("Could not save embeddings to MongoDB.") from exc
+        batch_size = settings.QDRANT_UPSERT_BATCH_SIZE
+        for start in range(0, len(points), batch_size):
+            batch = points[start:start + batch_size]
+            for attempt in range(4):
+                try:
+                    _qdrant().upsert(collection_name=_name(), points=batch, wait=True)
+                    break
+                except Exception as exc:
+                    # Upserts use deterministic point IDs, so retrying after an ambiguous timeout is idempotent.
+                    retryable = {"ResponseHandlingException", "ConnectTimeout", "ReadTimeout", "WriteTimeout",
+                                 "ConnectError", "ReadError", "WriteError", "RemoteProtocolError"}
+                    current = exc
+                    is_retryable = False
+                    while current is not None:
+                        if type(current).__name__ in retryable:
+                            is_retryable = True
+                            break
+                        current = current.__cause__ or current.__context__
+                    if not is_retryable or attempt == 3:
+                        raise
+                    delay = 2 ** attempt
+                    logger.warning("Transient Qdrant upsert failure; retrying batch %d/%d in %ds (%s)",
+                                   start // batch_size + 1, (len(points) + batch_size - 1) // batch_size,
+                                   delay, type(exc).__name__)
+                    time.sleep(delay)
+        bump_revision()
+    except Exception as exc:
+        logger.exception("Saving embeddings to Qdrant failed")
+        raise VectorStoreError("Could not save embeddings to Qdrant.") from exc
+
+
+def _scroll(filter_obj=None, with_vectors=False, batch_size=1000):
+    if not ensure_collection():
+        return
+    offset = None
+    from qdrant_client import models
+    if filter_obj is None:
+        filter_obj = models.Filter(must=[models.FieldCondition(key="kind", match=models.MatchValue(value="chunk"))])
+    else:
+        filter_obj = models.Filter(must=[models.FieldCondition(key="kind", match=models.MatchValue(value="chunk")),
+                                         *list(filter_obj.must or [])],
+                                   should=filter_obj.should, must_not=filter_obj.must_not)
+    while True:
+        try:
+            points, offset = _qdrant().scroll(collection_name=_name(), scroll_filter=filter_obj,
+                                               limit=batch_size, offset=offset,
+                                               with_payload=True, with_vectors=with_vectors)
+        except Exception as exc:
+            logger.exception("Qdrant scroll failed while reading collection '%s'", _name())
+            raise VectorStoreError("Could not read points from Qdrant.") from exc
+        for point in points:
+            payload = dict(point.payload or {})
+            payload.pop("embedding_id", None)
+            payload["_id"] = (point.payload or {}).get("embedding_id", str(point.id))
+            if with_vectors:
+                payload["embedding"] = point.vector
+            yield payload
+        if offset is None:
+            break
 
 
 def existing_hashes(source_collection: str) -> dict:
-    """{embedding_id: content_hash} for one source collection (used to skip unchanged documents)."""
-    try:
-        cursor = collection().find({"metadata.collection": source_collection}, {"metadata.content_hash": 1})
-        return {d["_id"]: d.get("metadata", {}).get("content_hash") for d in cursor}
-    except PyMongoError as exc:
-        raise MongoServiceError() from exc
-
-
-def delete_ids(ids: list):
-    try:
-        for start in range(0, len(ids), 1000):
-            collection().delete_many({"_id": {"$in": ids[start:start + 1000]}})
-    except PyMongoError as exc:
-        raise MongoServiceError() from exc
-
-
-def delete_collections(names) -> int:
-    """Remove every embedding whose source collection is in `names`. Returns the number deleted."""
-    names = [str(name) for name in (names or []) if str(name).strip()]
-    if not names:
-        return 0
-    try:
-        return int(collection().delete_many({"metadata.collection": {"$in": names}}).deleted_count)
-    except PyMongoError as exc:
-        raise MongoServiceError() from exc
-
-
-def count() -> int:
-    try:
-        return collection().count_documents({})
-    except PyMongoError as exc:
-        raise MongoServiceError() from exc
+    from qdrant_client import models
+    flt = models.Filter(must=[models.FieldCondition(key="metadata.collection", match=models.MatchValue(value=source_collection))])
+    return {d["_id"]: {"hash": d.get("metadata", {}).get("content_hash"),
+                       "workspace_ids": d.get("metadata", {}).get("workspace_ids") or []}
+            for d in _scroll(flt)}
 
 
 def distinct_models() -> list:
+    from qdrant_client import models
+    flt = models.Filter(must=[models.FieldCondition(key="kind", match=models.MatchValue(value="chunk"))])
+    models_found = set()
+    for d in _scroll(flt, batch_size=20):
+        m = d.get("metadata", {}).get("model")
+        if m:
+            models_found.add(m)
+            break                
+    return sorted(models_found)
+
+
+def update_workspace_ids(pairs: list):
+    for embedding_id, workspace_ids in pairs:
+        try:
+            _qdrant().set_payload(collection_name=_name(), payload={"workspace_ids": workspace_ids or []},
+                                  points=[_point_id(embedding_id)], key="metadata", wait=True)
+        except Exception as exc:
+            raise VectorStoreError("Could not update Qdrant workspace metadata.") from exc
+    if pairs:
+        bump_revision()
+
+
+def delete_ids(ids: list):
+    if not ids:
+        return
     try:
-        return [m for m in collection().distinct("metadata.model") if m]
-    except PyMongoError as exc:
-        raise MongoServiceError() from exc
+        _qdrant().delete(collection_name=_name(), points_selector=[_point_id(i) for i in ids], wait=True)
+        bump_revision()
+    except Exception as exc:
+        raise VectorStoreError("Could not delete Qdrant vectors.") from exc
+
+
+def delete_collections(names) -> int:
+    from qdrant_client import models
+    names = [str(name) for name in names or [] if str(name).strip()]
+    if not names or not ensure_collection():
+        return 0        
+    before = count()
+    flt = models.Filter(must=[models.FieldCondition(key="metadata.collection", match=models.MatchAny(any=names))])
+    try:
+        _qdrant().delete(collection_name=_name(), points_selector=models.FilterSelector(filter=flt), wait=True)
+        removed = before - count()
+        if removed:
+            bump_revision()
+        return removed
+    except Exception as exc:
+        raise VectorStoreError("Could not remove blocked vectors from Qdrant.") from exc
 
 
 def get_many(ids: list) -> dict:
-    """{id: document without the vector}"""
-    if not ids:
+    if not ids or not ensure_collection():
         return {}
     try:
-        return {d["_id"]: d for d in collection().find({"_id": {"$in": list(ids)}}, NO_VECTOR)}
-    except PyMongoError as exc:
-        raise MongoServiceError() from exc
+        points = _qdrant().retrieve(collection_name=_name(), ids=[_point_id(i) for i in ids],
+                                    with_payload=True, with_vectors=False)
+        out = {}
+        for point in points:
+            payload = dict(point.payload or {})
+            source_id = payload.pop("embedding_id", None)
+            if source_id is not None:
+                payload["_id"] = source_id
+                out[source_id] = payload
+        return out
+    except Exception as exc:
+        raise VectorStoreError("Could not retrieve chunks from Qdrant.") from exc
+
+
+def find_ids_by_workspace(workspace_id: str) -> frozenset:
+    from qdrant_client import models
+    flt = models.Filter(must=[models.FieldCondition(key="metadata.workspace_ids", match=models.MatchValue(value=workspace_id))])
+    return frozenset(d["_id"] for d in _scroll(flt))
 
 
 def find_referencing_batch(primary_ids: list, limit_per_id: int = 3, allowed_ids=None) -> dict:
-    """Records (first chunk only) pointing AT any of the given document ids in a single batched query."""
+    from qdrant_client import models
+    grouped = {str(pid): [] for pid in primary_ids}
     if not primary_ids:
-        return {}
-    try:
-        query = {"relationships.ref_id": {"$in": primary_ids}, "metadata.chunk_index": 0}
+        return grouped
+    for primary_id in primary_ids:
+        nested = models.NestedCondition(nested=models.Nested(key="relationships", filter=models.Filter(must=[
+            models.FieldCondition(key="ref_id", match=models.MatchValue(value=str(primary_id)))
+        ])))
+        must = [models.FieldCondition(key="metadata.chunk_index", match=models.MatchValue(value=0)), nested]
         if allowed_ids is not None:
             if not allowed_ids:
-                return {}
-            query["_id"] = {"$in": list(allowed_ids)}
-        cursor = collection().find(query, NO_VECTOR).limit(limit_per_id * len(primary_ids))
-        grouped = {pid: [] for pid in primary_ids}
-        for d in cursor:
-            for rel in d.get("relationships", []):
-                ref_id = rel.get("ref_id")
-                if ref_id in grouped and len(grouped[ref_id]) < limit_per_id:
-                    if d not in grouped[ref_id]:
-                        grouped[ref_id].append(d)
-        return grouped
-    except PyMongoError as exc:
-        raise MongoServiceError() from exc
+                continue
+            must.append(models.FieldCondition(key="embedding_id", match=models.MatchAny(any=list(allowed_ids))))
+        for doc in _scroll(models.Filter(must=must)):
+            grouped[str(primary_id)].append(doc)
+            if len(grouped[str(primary_id)]) >= limit_per_id:
+                break
+    return grouped
 
 
 def find_referencing(primary_id: str, exclude_collection_ids=(), limit: int = 3, allowed_ids=None) -> list:
-    """Records (first chunk only) whose relationships point AT the given document id."""
-    try:
-        query = {"relationships.ref_id": primary_id, "metadata.chunk_index": 0}
-        if allowed_ids is not None:
-            if not allowed_ids:
-                return []
-            query["_id"] = {"$in": list(allowed_ids)}
-        cursor = collection().find(query, NO_VECTOR).limit(limit + len(exclude_collection_ids))
-        return [d for d in cursor if d["_id"] not in exclude_collection_ids][:limit]
-    except PyMongoError as exc:
-        raise MongoServiceError() from exc
+    docs = find_referencing_batch([primary_id], limit_per_id=limit + len(exclude_collection_ids),
+                                  allowed_ids=allowed_ids).get(str(primary_id), [])
+    excluded = set(exclude_collection_ids)
+    return [doc for doc in docs if doc["_id"] not in excluded][:limit]
 
 
-def iter_vectors(batch_size: int = 2000):
-    """Stream (ids, source_collections, vectors) for building the HNSW index."""
+def find_ids_for_user(user_id: str, workspace_id=None) -> frozenset:
+    from qdrant_client import models
+    user_id = str(user_id)
+    common = [models.FieldCondition(key="kind", match=models.MatchValue(value="chunk"))]
+    if workspace_id is not None:
+        common.append(models.FieldCondition(key="metadata.workspace_ids", match=models.MatchValue(value=workspace_id)))
+
     try:
-        cursor = collection().find({}, {"embedding": 1, "metadata.collection": 1}).batch_size(batch_size)
-        ids, cols, vecs = [], [], []
-        for doc in cursor:
-            if not doc.get("embedding"):
-                continue
-            ids.append(doc["_id"])
-            cols.append(doc["metadata"]["collection"])
-            vecs.append(doc["embedding"])
-            if len(ids) >= batch_size:
-                yield ids, cols, np.asarray(vecs, dtype="float32")
-                ids, cols, vecs = [], [], []
-        if ids:
-            yield ids, cols, np.asarray(vecs, dtype="float32")
-    except PyMongoError as exc:
-        raise MongoServiceError() from exc
+        # Fetch profile chunks through indexed scalar metadata.
+        profile_filter = models.Filter(must=[*common,
+            models.FieldCondition(key="metadata.collection", match=models.MatchValue(value="users")),
+            models.FieldCondition(key="metadata.primary_id", match=models.MatchValue(value=user_id)),
+        ])
+        result = {doc["_id"] for doc in _scroll(profile_filter)}
+
+        # Let Qdrant narrow candidates by array fields, then verify both values occur
+        # on the same relationship entry to avoid cross-matching different refs.
+        relationship_filter = models.Filter(must=[*common,
+            models.FieldCondition(key="relationships[].ref_collection", match=models.MatchValue(value="users")),
+            models.FieldCondition(key="relationships[].ref_id", match=models.MatchValue(value=user_id)),
+        ])
+        for doc in _scroll(relationship_filter):
+            if any(rel.get("ref_collection") == "users" and str(rel.get("ref_id")) == user_id
+                   for rel in doc.get("relationships", [])):
+                result.add(doc["_id"])
+        return frozenset(result)
+    except Exception:
+        logger.exception("Filtered Qdrant access lookup failed; falling back to payload scan")
+
+    # Compatibility fallback for Qdrant server versions that do not support the
+    # optimized array-field filter. Keep the same authorization check in Python.
+    result = set()
+    for doc in _scroll():
+        metadata = doc.get("metadata", {})
+        if workspace_id is not None and workspace_id not in (metadata.get("workspace_ids") or []):
+            continue
+        is_profile = metadata.get("collection") == "users" and metadata.get("primary_id") == user_id
+        is_referenced = any(rel.get("ref_collection") == "users" and str(rel.get("ref_id")) == user_id
+                            for rel in doc.get("relationships", []))
+        if is_profile or is_referenced:
+            result.add(doc["_id"])
+    return frozenset(result)
+
+
+def distinct_field_names(source_collection: str) -> set:
+    from qdrant_client import models
+    flt = models.Filter(must=[models.FieldCondition(key="metadata.collection", match=models.MatchValue(value=source_collection))])
+    return {field for d in _scroll(flt) for field in d.get("metadata", {}).get("field_names", [])}
+
+
+def all_texts():
+    return (d.get("text", "") for d in _scroll())
+
+
+def search_text(query: str, vector, limit: int, collections=None, allowed_ids=None) -> list:
+    from qdrant_client import models
+    must = [models.FieldCondition(key="kind", match=models.MatchValue(value="chunk")),
+            models.FieldCondition(key="text", match=models.MatchText(text=query))]
+    if collections:
+        must.append(models.FieldCondition(key="metadata.collection", match=models.MatchAny(any=collections)))
+    if allowed_ids is not None:
+        # IDs are payload values because Qdrant point IDs must be UUIDs or unsigned integers.
+        if not allowed_ids:
+            return []
+        must.append(models.FieldCondition(key="embedding_id", match=models.MatchAny(any=list(allowed_ids))))
+    filt = models.Filter(must=must)
+    try:
+        result = _qdrant().query_points(collection_name=_name(), query=np.asarray(vector, dtype="float32").tolist(),
+                                        query_filter=filt, limit=limit, with_payload=True).points
+    except Exception as exc:
+        raise VectorStoreError("Qdrant text search failed. Check the collection and embedding dimensions.") from exc
+    return [((p.payload or {}).get("embedding_id"), float(p.score)) for p in result
+            if (p.payload or {}).get("embedding_id")]
+
+
+def vector_search(vector, limit: int, collections=None, allowed_ids=None) -> list:
+    from qdrant_client import models
+    if not ensure_collection():
+        return []
+    must = [models.FieldCondition(key="kind", match=models.MatchValue(value="chunk"))]
+    if collections:
+        must.append(models.FieldCondition(key="metadata.collection", match=models.MatchAny(any=collections)))
+    if allowed_ids is not None:
+        if not allowed_ids:
+            return []
+        must.append(models.FieldCondition(key="embedding_id", match=models.MatchAny(any=list(allowed_ids))))
+        filt = models.Filter(must=must)
+    else:
+        filt = models.Filter(must=must) if must else None
+    try:
+        points = _qdrant().query_points(collection_name=_name(), query=np.asarray(vector, dtype="float32").tolist(),
+                                        query_filter=filt, limit=limit, with_payload=True).points
+    except Exception as exc:
+        raise VectorStoreError("Qdrant vector search failed. Check the collection and embedding dimensions.") from exc
+    return [((p.payload or {}).get("embedding_id"), float(p.score)) for p in points
+            if (p.payload or {}).get("embedding_id")]
+
+
+def list_ids():
+    return [d["_id"] for d in _scroll()]
+
+
+def bump_revision():
+    """Update a small Qdrant marker so other app workers invalidate cached answers after writes."""
+    from qdrant_client import models
+    ensure_collection()
+    info = _qdrant().get_collection(_name())
+    size = int(info.config.params.vectors.size)
+    _qdrant().upsert(collection_name=_name(), points=[models.PointStruct(
+        id=_revision_point_id(), vector=[1.0] + [0.0] * (size - 1),
+        payload={"kind": "revision", "revision": datetime.now(timezone.utc).isoformat()})], wait=True)
+
+
+def revision() -> str:
+    if not ensure_collection():
+        return "empty"
+    try:
+        point = _qdrant().retrieve(collection_name=_name(), ids=[_revision_point_id()],
+                                   with_payload=True, with_vectors=False)
+        if point:
+            return str((point[0].payload or {}).get("revision", "unknown"))
+        return str(count())
+    except Exception as exc:
+        raise VectorStoreError("Could not read the Qdrant collection revision.") from exc
+
+
+def reset_for_tests():
+    global _client
+    _client = None

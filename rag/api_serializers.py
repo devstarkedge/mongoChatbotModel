@@ -7,6 +7,7 @@ class AskRequestSerializer(serializers.Serializer):
     user_id = serializers.CharField(max_length=128, required=False, allow_blank=True, trim_whitespace=True)
     email = serializers.EmailField(max_length=254, required=False, allow_blank=True)
     role = serializers.CharField(max_length=64, required=False, allow_blank=True, trim_whitespace=True)
+    workspace_id = serializers.CharField(max_length=128, required=False, allow_blank=True, trim_whitespace=True)
     top_k = serializers.IntegerField(min_value=1, max_value=50, required=False)
     hops = serializers.IntegerField(min_value=0, max_value=3, required=False)
     edit_index = serializers.IntegerField(min_value=0, required=False)
@@ -20,6 +21,7 @@ class SearchRequestSerializer(serializers.Serializer):
     user_id = serializers.CharField(max_length=128, required=False, allow_blank=True, trim_whitespace=True)
     email = serializers.EmailField(max_length=254, required=False, allow_blank=True)
     role = serializers.CharField(max_length=64, required=False, allow_blank=True, trim_whitespace=True)
+    workspace_id = serializers.CharField(max_length=128, required=False, allow_blank=True, trim_whitespace=True)
     top_k = serializers.IntegerField(min_value=1, max_value=50, required=False)
     hops = serializers.IntegerField(min_value=0, max_value=3, required=False)
     collections = serializers.ListField(
