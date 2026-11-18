@@ -3405,14 +3405,17 @@ def _project_or_task_team_answer(question: str, history: list = None, workspace_
     # Sub-intent: Actively working / Currently active / Contributing
     elif re.search(r"\b(?:actively\s+working|active\s+in|currently\s+active|actively\s+contributing|who\s+is\s+currently\s+active)\b", q_lower):
         names_act = [u_names[u] for u in active_uids if u in u_names]
-        lines = [f"Members actively working / contributing to project '{b_name}' ({len(names_act)}):"]
-        for u in sorted(active_uids, key=lambda x: user_logged_mins.get(x, 0), reverse=True):
-            if u in u_names:
-                uname = u_names[u]
-                mins = user_logged_mins.get(u, 0)
-                time_str = f" — {_format_duration(mins)} logged" if mins > 0 else " — currently in-progress"
-                lines.append(f"- **{uname}**{time_str}")
-        direct_answer = "\n".join(lines)
+        if not names_act:
+            direct_answer = f"No members are currently actively working or have logged time on project '{b_name}'."
+        else:
+            lines = [f"Members actively working / contributing to project '{b_name}' ({len(names_act)}):"]
+            for u in sorted(active_uids, key=lambda x: user_logged_mins.get(x, 0), reverse=True):
+                if u in u_names:
+                    uname = u_names[u]
+                    mins = user_logged_mins.get(u, 0)
+                    time_str = f" — {_format_duration(mins)} logged" if mins > 0 else " — currently in-progress"
+                    lines.append(f"- **{uname}**{time_str}")
+            direct_answer = "\n".join(lines)
 
     # Sub-intent: Working vs assigned
     elif re.search(r"\b(?:working\s+versus\s+assigned|working\s+vs\s+assigned|active\s+vs\s+assigned)\b", q_lower):
@@ -3442,9 +3445,9 @@ def _project_or_task_team_answer(question: str, history: list = None, workspace_
             lines.append(f"- **Task Assignees ({len(assigned_names)})**: " + ", ".join(assigned_names))
         if dept_member_names:
             lines.append(f"- **Department Team ({len(dept_member_names)})**: " + ", ".join(dept_member_names))
-        if active_uids:
-            active_names = [u_names[u] for u in active_uids if u in u_names]
-            lines.append(f"- **Active Contributors**: {len(active_names)} members with logged time or in-progress work.")
+        active_names = sorted({u_names[u] for u in active_uids if u in u_names}, key=str.casefold)
+        if active_names:
+            lines.append(f"- **Active Contributors ({len(active_names)})**: " + ", ".join(active_names))
         lines.append(f"- **Tasks / Cards**: {len(cards)} total.")
         direct_answer = "\n".join(lines)
 
