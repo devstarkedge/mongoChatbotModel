@@ -608,6 +608,8 @@ def is_person_attribute_question(question: str) -> bool:
         return bool(_PRONOUN_PATTERN.search(q)
                     or re.search(r"['’]s\s+role|\brole\s+(?:of|for)\b", q, re.IGNORECASE))
     if _USER_ATTR_PROFILE.search(q):
+        if re.search(r"\b(?:working\s+on|assigned\s+to|responsible\s+for|allocated\s+to|involved\s+in|project|board|task|card)\b", q, re.IGNORECASE):
+            return False
         return True
     return False
 
@@ -3115,7 +3117,7 @@ def _assignee_board_match(db, name: str):
     wanted = _norm(name)
     wanted_tokens = wanted.split()
     exact, partial = [], []
-    for board in db["boards"].find({}, {"name": 1, "project": 1, "title": 1}):
+    for board in db["boards"].find({}, {"name": 1, "project": 1, "title": 1, "department": 1, "owner": 1, "members": 1}):
         label = _clean_label(board.get("name") or board.get("project") or board.get("title"), "")
         label_norm = _norm(label)
         if not label_norm:
@@ -3131,94 +3133,336 @@ def _assignee_board_match(db, name: str):
     return partial[0] if partial else None
 
 
-def _assignee_count_answer(question: str):
-    if not is_assignee_count_question(question):
-        return None
+def _extract_team_target(question: str) -> str | None:
+    """Extract project or task target from team and assignment queries."""
+    clean_q = " ".join((question or "").split()).strip()
+    _TEAM_TARGET_PATTERNS = [
+        re.compile(r"\bhow\s+large\s+is\s+(?:the\s+)?(?:project\s+|board\s+)?['\"]?([^'\"?.,!]+?)['\"]?(?:\s+(?:project\s+team|project|board|team))?\??$", re.IGNORECASE),
+        re.compile(r"\b(?:working\s+versus\s+assigned|working\s+vs\s+assigned|active\s+vs\s+assigned)\s+(?:in|for|on)\s+(?:the\s+)?(?:project\s+|board\s+|task\s+|card\s+)?['\"]?([^'\"?.,!]+?)['\"]?(?:\s+(?:project|board|task|card))?(?=[?.!,]|$)", re.IGNORECASE),
+        re.compile(r"\b(?:who\s+(?:is|are)\s+(?:currently\s+)?actively\s+contributing\s+to)\s+(?:the\s+)?(?:project\s+|board\s+|task\s+|card\s+)?['\"]?([^'\"?.,!]+?)['\"]?(?:\s+(?:project|board|task|card))?(?=[?.!,]|$)", re.IGNORECASE),
+        re.compile(r"\b(?:working\s+on|assigned\s+to|involved\s+in|responsible\s+for|allocated\s+to|handling|part\s+of|active\s+in|contributing\s+to|participating\s+in|engaged\s+in)\s+(?:the\s+)?(?:project\s+|board\s+|task\s+|card\s+)?['\"]?([^'\"?.,!]+?)['\"]?(?:\s+(?:project|board|task|card))?(?=[?.!,]|$)", re.IGNORECASE),
+        re.compile(r"\b(?:team\s+size\s+(?:of|for)|team\s+members\s+(?:of|in)|assignees\s+(?:of|in)|members\s+(?:of|in|assigned\s+to)|contributors\s+(?:of|in)|participants\s+(?:of|in))\s+(?:the\s+)?(?:project\s+|board\s+|task\s+|card\s+)?['\"]?([^'\"?.,!]+?)['\"]?(?:\s+(?:project|board|task|card))?(?=[?.!,]|$)", re.IGNORECASE),
+        re.compile(r"\b(?:how\s+many|count|number\s+of|total\s+number\s+of|show\s+(?:the\s+)?total\s+(?:number\s+of)?|tell\s+me\s+(?:the\s+)?(?:current\s+|assigned\s+)?team\s+size\s+(?:of|for))\s*(?:people|team\s+members|employees|users|members|resources|assignees)?\s*(?:are\s+)?(?:currently\s+)?(?:working\s+on|assigned\s+to|involved\s+in|allocated\s+to|participating\s+in|linked\s+to|contributing\s+to|engaged\s+in|in\s+the|in|for)?\s+(?:the\s+)?(?:project\s+|board\s+|task\s+|card\s+)?['\"]?([^'\"?.,!]+?)['\"]?(?:\s+(?:project|board|task|card))?(?=[?.!,]|$)", re.IGNORECASE),
+        re.compile(r"\b(?:list\s+all|list\s+the|list|show\s+(?:the\s+)?names\s+of|show\s+all|show\s+everyone|show\s+assigned|show\s+members|give\s+me\s+(?:the\s+)?list\s+of|which\s+employees|which\s+users|which\s+members|which\s+assigned\s+members)\s+(?:team\s+members|members|employees|people|users|participants|contributors|assignees)?\s*(?:working\s+on|assigned\s+to|involved\s+in|allocated\s+to|contributing\s+to|of|in)\s+(?:the\s+)?(?:project\s+|board\s+|task\s+|card\s+)?['\"]?([^'\"?.,!]+?)['\"]?(?:\s+(?:project|board|task|card))?(?=[?.!,]|$)", re.IGNORECASE),
+        re.compile(r"\b(?:anyone|anybody|someone)\s+working\s+on\s+(?:the\s+)?(?:project\s+|board\s+|task\s+|card\s+)?['\"]?([^'\"?.,!]+?)['\"]?(?:\s+(?:project|board|task|card))?(?=[?.!,]|$)", re.IGNORECASE),
+        re.compile(r"^(?:list\s+|show\s+)?['\"]?([^'\"?.,!]+?)['\"]?\s+(?:contributors|participants|team\s+size|team\s+members|project\s+team)\s*\??$", re.IGNORECASE),
+        re.compile(r"\b(?:in|for|on)\s+(?:the\s+)?(?:project\s+|board\s+|task\s+|card\s+)?['\"]?([^'\"?.,!]+?)['\"]?(?:\s+(?:project|board|task|card))?\b(?=[?.!,]|$)", re.IGNORECASE),
+    ]
+    _GENERIC_TARGETS = {
+        "all", "every", "project", "board", "task", "card", "this", "that", "this project",
+        "that project", "this card", "this task", "the project", "the task", "assigned tasks",
+        "assigned task", "these tasks", "those tasks", "work"
+    }
+    for pat in _TEAM_TARGET_PATTERNS:
+        m = pat.search(clean_q)
+        if m:
+            target = m.group(1).strip(" '\"?.!,")
+            target = re.sub(r"^(?:the\s+)?(?:project\s+|board\s+|task\s+|card\s+)", "", target, flags=re.IGNORECASE)
+            target = re.sub(r"\s+(?:project|board|task|card)$", "", target, flags=re.IGNORECASE)
+            target = re.sub(r"^(?:the|this|that)\s+", "", target, flags=re.IGNORECASE).strip(" '\"?.!,")
+            if target and _norm(target) not in _GENERIC_TARGETS:
+                return target
+    return None
+
+
+def _resolve_team_target_from_history(history, db):
+    """If the question refers to 'this project' or 'this card', find the referenced item from recent turns."""
+    if not history:
+        return None, None
+    for turn in reversed(history):
+        if not isinstance(turn, dict):
+            continue
+        for text in [turn.get("question", ""), turn.get("answer", "")]:
+            if not text:
+                continue
+            b = _assignee_board_match(db, text)
+            if b:
+                return b, "project"
+            c, _ = _assignee_card_match(db, text)
+            if c:
+                return c, "task"
+    return None, None
+
+
+def _project_or_task_team_answer(question: str, history: list = None, workspace_id=None):
+    """Answer team size, assignee, active vs assigned, and member queries for projects and tasks.
+
+    For projects (boards), it searches: board (project) -> department (id) -> user (id)
+    along with board owner, direct board members, and card assignees/logged-time contributors.
+    """
+    _TEAM_INTENT_PATTERN = re.compile(
+        r"\b(?:"
+        r"how\s+many\s+(?:people|team\s+members|employees|users|members|resources|assignees)|"
+        r"who\s+(?:is|are)\s+(?:currently\s+)?(?:working|assigned|involved|responsible|allocated|handling|part\s+of|active|contributing|(?:the\s+)?(?:team\s+members|members)\s+of)|"
+        r"who\s+has\s+been\s+allocated|who\s+is\s+part\s+of|who\s+is\s+handling|who\s+are\s+(?:the\s+)?team\s+members|"
+        r"team\s+size|project\s+team|how\s+large\s+is|"
+        r"list\s+(?:all\s+)?(?:the\s+)?(?:members|assignees|employees|people|participants|contributors)|"
+        r"show\s+(?:all\s+|the\s+)?(?:names\s+of\s+)?(?:members|employees|people|users|assignees|contributors|project\s+participants)|"
+        r"which\s+(?:employees|users|members|assignees)|"
+        r"give\s+me\s+(?:the\s+)?list\s+of\s+(?:people|members|employees|users)|"
+        r"count\s+(?:the\s+)?(?:team\s+members|project\s+members|users|assignees|members)|"
+        r"actively\s+(?:working|contributing)|active\s+(?:in|members|contributors)|"
+        r"haven['’]t\s+started|havent\s+started|not\s+started|not\s+logged\s+any\s+time|no\s+logged\s+time|without\s+logged\s+time|pending\s+tasks|"
+        r"completed\s+(?:their\s+)?tasks|"
+        r"working\s+versus\s+assigned|working\s+vs\s+assigned|active\s+vs\s+assigned|"
+        r"anyone\s+working\s+on|total\s+assignees|"
+        r"people\s+working\s+on|members\s+assigned\s+to|people\s+assigned\s+to|"
+        r"people\s+involved\s+in|how\s+many\s+resources\s+are\s+allocated|"
+        r"number\s+of\s+project\s+assignees|show\s+everyone\s+contributing|"
+        r"show\s+project\s+participants|how\s+many\s+users\s+are\s+involved|"
+        r"contributors\b|participants\b|project\s+assignments\b|"
+        r"team\s+members\s+of\b"
+        r")\b",
+        re.IGNORECASE,
+    )
     text = question or ""
-    _term_match = _ASSIGNEE_TERM.search(text)
-    _used_term = _term_match.group(0).lower() if _term_match else "assignee"
-    if _used_term.startswith("assigned"):
-        _used_term = "assignee"
-    _noun_single = _ASSIGNEE_NOUN_MAP.get(_used_term, "assignee")
-    _noun_plural = _noun_single + "s" if not _noun_single.endswith("s") else _noun_single
-    target, kind = _assignee_target(question)
-    if not target:
+    if not _TEAM_INTENT_PATTERN.search(text) and not is_assignee_count_question(text):
         return None
+
     db = mongo_service.get_db()
     existing = set(db.list_collection_names())
-    if "cards" not in existing:
+    if "boards" not in existing and "cards" not in existing:
         return None
 
-    card = None
-    board = None
-    if kind == "project":
-        board = _assignee_board_match(db, target) if "boards" in existing else None
-    elif kind == "task":
-        card, matches = _assignee_card_match(db, target)
+    target_str = _extract_team_target(text)
+    if not target_str:
+        target_str, _ = _assignee_target(text)
+
+    card, board = None, None
+    kind = "project" if re.search(r"\b(?:projects?|boards?)\b", text, re.IGNORECASE) else (
+           "task" if re.search(r"\b(?:tasks?|cards?|tickets?)\b", text, re.IGNORECASE) else None)
+
+    if target_str:
+        if kind == "task":
+            card, matches = _assignee_card_match(db, target_str)
+        elif kind == "project":
+            board = _assignee_board_match(db, target_str)
+        else:
+            board = _assignee_board_match(db, target_str)
+            if not board:
+                card, matches = _assignee_card_match(db, target_str)
     else:
-        card, matches = _assignee_card_match(db, target)
-        if card is None and "boards" in existing:
-            board = _assignee_board_match(db, target)
+        obj, h_kind = _resolve_team_target_from_history(history, db)
+        if h_kind == "project":
+            board = obj
+        elif h_kind == "task":
+            card = obj
 
-    if kind == "task" and card is None:
-        return None
-    if kind == "project" and board is None:
-        return None
-    if card is None and board is None:
+    if not board and not card:
         return None
 
+    started = time.perf_counter()
+
+    # -------------------------------------------------------------
+    # CASE A: TARGET IS A CARD (TASK)
+    # -------------------------------------------------------------
     if card is not None:
-        if len(matches) > 1:
-            parts = []
-            records = []
-            for item in matches:
-                t = _clean_label(strip_html(item.get("title")), "Untitled")
-                c, names = _assignee_summary(db, [item])
-                noun = "person" if c == 1 else "people"
-                parts.append(f"{t}: {c} {noun}" + (f" ({', '.join(names)})" if names else ""))
-                records.append({"document_id": str(item.get("_id", "")), "name": t,
-                                "text": f"Task: {t}; Assignees: {', '.join(names) or c}"})
-            return ExactResult(
-                collection="cards", total=len(matches), records=records, conditions=f"tasks matching '{target}'",
-                complete=True, source="planner", operation="list",
-                direct_answer=f"Multiple tasks match '{target}': " + "; ".join(parts) + ".",
-                notes=[f"Found {len(matches)} matching tasks."],
-            )
-        title = _clean_label(strip_html(card.get("title")), "The task")
-        count, names = _assignee_summary(db, [card])
-        noun = "assignee" if count == 1 else "assignees"
-        answer = f"{title} has {count} {noun}."
-        if names:
-            answer = f"{title} has {count} {noun}." + f" ({', '.join(names)})"
+        card = db["cards"].find_one({"_id": card["_id"]}) or card
+        c_title = _clean_label(strip_html(card.get("title")), "Task")
+        b_doc = db["boards"].find_one({"_id": card.get("board")}) if "boards" in existing and card.get("board") else None
+        b_name = _clean_label(b_doc.get("name") if b_doc else "Unknown project", "Project")
+        status = str(card.get("status") or "open").strip()
+        assignee_uids = [str(a) for a in (card.get("assignees") or []) if a]
+        logged_uids = {}
+        for entry in (card.get("loggedTime") or []):
+            if isinstance(entry, dict) and entry.get("user"):
+                u = str(entry.get("user"))
+                m = round((_to_number(entry.get("hours")) or 0) * 60 + (_to_number(entry.get("minutes")) or 0))
+                logged_uids[u] = logged_uids.get(u, 0) + m
+        all_u = set(assignee_uids) | set(logged_uids.keys())
+        u_names = _logged_time_user_names(db, all_u)
+        assignee_names = [u_names[u] for u in assignee_uids if u in u_names]
+        count = len(assignee_names)
+        noun = "person" if count == 1 else "people"
+
+        lines = [f"Task '{c_title}' (Project: {b_name}, Status: `{status}`):"]
+        if count == 0:
+            lines.append("No team members are currently assigned to this task.")
+        else:
+            lines.append(f"{count} {noun} assigned: " + ", ".join(assignee_names))
+        if logged_uids:
+            lines.append("")
+            lines.append("Logged time on this task:")
+            for u in sorted(logged_uids.keys(), key=lambda x: logged_uids[x], reverse=True):
+                uname = u_names.get(u, "Team member")
+                lines.append(f"- **{uname}**: {_format_duration(logged_uids[u])}")
+
+        direct_answer = "\n".join(lines).strip()
+        records = [{
+            "document_id": str(card.get("_id", "")),
+            "name": c_title,
+            "text": f"Task: {c_title}; Project: {b_name}; Status: {status}; Assignees: {', '.join(assignee_names) or count}"
+        }]
         return ExactResult(
-            collection="cards", total=1,
-            records=[{"document_id": str(card.get("_id", "")), "name": title,
-                      "text": f"Task: {title}; Assignees: {', '.join(names) or count}"}],
-            conditions=f"assignees in task '{title}'", complete=True, source="planner", operation="count",
-            direct_answer=answer,
-            notes=[f"Counted the 'assignees' array on card '{title}'."],
+            collection="cards", total=1, records=records,
+            conditions=f"task = {c_title}", complete=True, source="planner",
+            operation="lookup" if re.search(r"\bwho\b", text, re.IGNORECASE) else "count",
+            direct_answer=direct_answer, timings={"db": round((time.perf_counter() - started) * 1000)}
         )
 
-    board_id = board.get("_id")
-    board_ids = _id_variants([board_id])
-    cards = list(db["cards"].find({"board": {"$in": board_ids}}, {"assignees": 1})) if board_id is not None else []
-    name = _clean_label(board.get("name") or board.get("project") or board.get("title"), "The project")
-    count, names = _assignee_summary(db, cards)
-    noun = _noun_single if count == 1 else _noun_plural
-    card_noun = "card" if len(cards) == 1 else "cards"
-    answer = f"Project {name} has {count} unique {noun} across {len(cards)} {card_noun}."
-    if names:
-        answer = (f"Project {name} has {count} unique {noun} across {len(cards)} {card_noun}."
-                  f" ({', '.join(names)})")
+    # -------------------------------------------------------------
+    # CASE B: TARGET IS A BOARD (PROJECT)
+    # Flow: board (project) -> department (id) -> user (id)
+    # Also includes board owner, board members, card assignees, and active contributors.
+    # -------------------------------------------------------------
+    board = db["boards"].find_one({"_id": board["_id"]}) or board
+    b_id = board["_id"]
+    b_name = _clean_label(board.get("name") or board.get("project"), "Project")
+
+    # 1. Department linkage: board.department -> department -> users
+    dept_id = board.get("department")
+    dept_name = None
+    dept_uids = set()
+    if dept_id and "departments" in existing:
+        dept = db["departments"].find_one({"_id": dept_id})
+        if not dept and ObjectId.is_valid(str(dept_id)):
+            try:
+                dept = db["departments"].find_one({"_id": ObjectId(str(dept_id))})
+            except Exception:
+                pass
+        if dept:
+            dept_name = dept.get("name")
+            for m in (dept.get("members") or []):
+                if m: dept_uids.add(str(m))
+            for m in (dept.get("managers") or []):
+                if m: dept_uids.add(str(m))
+        d_oid = ObjectId(str(dept_id)) if ObjectId.is_valid(str(dept_id)) else dept_id
+        if "users" in existing:
+            for u in db["users"].find({"$or": [{"department": d_oid}, {"department": str(dept_id)}, {"department": dept_id}]}, {"_id": 1}):
+                dept_uids.add(str(u["_id"]))
+
+    owner_id = str(board["owner"]) if board.get("owner") else None
+    board_member_ids = {str(m) for m in (board.get("members") or []) if m}
+
+    # 2. Cards under board
+    b_vars = _id_variants([b_id])
+    cards = list(db["cards"].find({"board": {"$in": b_vars}}, {"title": 1, "status": 1, "assignees": 1, "loggedTime": 1, "isArchived": 1})) if "cards" in existing else []
+
+    card_assignee_ids = set()
+    user_logged_mins = {}
+    user_assigned_cards = {}
+
+    for c in cards:
+        c_title = _clean_label(strip_html(c.get("title")), "Untitled task")
+        c_status = str(c.get("status") or "to-do").strip().lower()
+        c_assignees = [str(a) for a in (c.get("assignees") or []) if a]
+        card_assignee_ids.update(c_assignees)
+        for a in c_assignees:
+            user_assigned_cards.setdefault(a, []).append((c_title, c_status))
+        for entry in (c.get("loggedTime") or []):
+            if isinstance(entry, dict) and entry.get("user"):
+                uid = str(entry.get("user"))
+                m = round((_to_number(entry.get("hours")) or 0) * 60 + (_to_number(entry.get("minutes")) or 0))
+                user_logged_mins[uid] = user_logged_mins.get(uid, 0) + m
+
+    all_uids = dept_uids | card_assignee_ids | board_member_ids
+    if owner_id:
+        all_uids.add(owner_id)
+    u_names = _logged_time_user_names(db, all_uids)
+
+    active_uids = {uid for uid in all_uids if user_logged_mins.get(uid, 0) > 0}
+    for uid, c_list in user_assigned_cards.items():
+        if any(st in {"in-progress", "inprogress", "doing", "active"} for _, st in c_list):
+            active_uids.add(uid)
+
+    inactive_assigned_uids = card_assignee_ids - active_uids
+    completed_uids = {uid for uid, c_list in user_assigned_cards.items() if c_list and all(st in {"done", "completed", "closed"} for _, st in c_list)}
+    pending_uids = {uid for uid, c_list in user_assigned_cards.items() if any(st not in {"done", "completed", "closed"} for _, st in c_list)}
+
+    q_lower = text.lower()
+
+    # Sub-intent: Haven't started / No logged time
+    if re.search(r"\b(?:haven['’]t\s+started|havent\s+started|not\s+started|not\s+logged\s+any\s+time|no\s+logged\s+time|without\s+logged\s+time)\b", q_lower):
+        names_inactive = [u_names[u] for u in inactive_assigned_uids if u in u_names]
+        if not names_inactive:
+            direct_answer = f"All assigned members in project '{b_name}' have started working or logged time."
+        else:
+            lines = [f"Assigned members in project '{b_name}' who have not logged any time ({len(names_inactive)}):"]
+            for u in sorted(names_inactive, key=str.casefold):
+                lines.append(f"- **{u}**")
+            direct_answer = "\n".join(lines)
+
+    # Sub-intent: Completed their tasks
+    elif re.search(r"\bcompleted\s+(?:their\s+)?tasks?\b", q_lower):
+        names_comp = [u_names[u] for u in completed_uids if u in u_names]
+        if not names_comp:
+            direct_answer = f"No assigned members have completed all their tasks in project '{b_name}' yet ({len(pending_uids)} have pending tasks)."
+        else:
+            lines = [f"Assigned members who have completed all their tasks in project '{b_name}' ({len(names_comp)}):"]
+            for u in sorted(names_comp, key=str.casefold):
+                lines.append(f"- **{u}**")
+            direct_answer = "\n".join(lines)
+
+    # Sub-intent: Pending tasks
+    elif re.search(r"\bpending\s+tasks?\b", q_lower):
+        names_pend = [u_names[u] for u in pending_uids if u in u_names]
+        lines = [f"Assigned members with pending tasks in project '{b_name}' ({len(names_pend)}):"]
+        for u in sorted(names_pend, key=str.casefold):
+            tasks_str = ", ".join(t[0] for t in user_assigned_cards.get(u, []) if t[1] not in {"done", "completed"})
+            lines.append(f"- **{u}**" + (f" (Tasks: {tasks_str})" if tasks_str else ""))
+        direct_answer = "\n".join(lines)
+
+    # Sub-intent: Actively working / Currently active / Contributing
+    elif re.search(r"\b(?:actively\s+working|active\s+in|currently\s+active|actively\s+contributing|who\s+is\s+currently\s+active)\b", q_lower):
+        names_act = [u_names[u] for u in active_uids if u in u_names]
+        lines = [f"Members actively working / contributing to project '{b_name}' ({len(names_act)}):"]
+        for u in sorted(active_uids, key=lambda x: user_logged_mins.get(x, 0), reverse=True):
+            if u in u_names:
+                uname = u_names[u]
+                mins = user_logged_mins.get(u, 0)
+                time_str = f" — {_format_duration(mins)} logged" if mins > 0 else " — currently in-progress"
+                lines.append(f"- **{uname}**{time_str}")
+        direct_answer = "\n".join(lines)
+
+    # Sub-intent: Working vs assigned
+    elif re.search(r"\b(?:working\s+versus\s+assigned|working\s+vs\s+assigned|active\s+vs\s+assigned)\b", q_lower):
+        names_act = [u_names[u] for u in active_uids if u in u_names]
+        names_ass = [u_names[u] for u in card_assignee_ids if u in u_names]
+        inactive_names = [u_names[u] for u in inactive_assigned_uids if u in u_names]
+        lines = [
+            f"Project '{b_name}' — Active vs Assigned Members:",
+            f"- **Actively Working ({len(names_act)})**: " + (", ".join(sorted(names_act, key=str.casefold)) or "None"),
+            f"- **Total Assigned to Tasks ({len(names_ass)})**: " + (", ".join(sorted(names_ass, key=str.casefold)) or "None"),
+            f"- **Assigned but Not Started (0 logged time) ({len(inactive_names)})**: " + (", ".join(sorted(inactive_names, key=str.casefold)) or "None"),
+        ]
+        direct_answer = "\n".join(lines)
+
+    # General / Count / Team size / Names of assigned people / Short queries
+    else:
+        owner_name = u_names.get(owner_id)
+        assigned_names = sorted({u_names[u] for u in card_assignee_ids if u in u_names}, key=str.casefold)
+        dept_member_names = sorted({u_names[u] for u in dept_uids if u in u_names}, key=str.casefold)
+        all_member_names = sorted(set(u_names.values()), key=str.casefold)
+
+        dept_str = f" (Department: **{dept_name}**)" if dept_name else ""
+        lines = [f"Project **{b_name}**{dept_str} team overview ({len(all_member_names)} total linked):"]
+        if owner_name:
+            lines.append(f"- **Project Owner**: {owner_name}")
+        if assigned_names:
+            lines.append(f"- **Task Assignees ({len(assigned_names)})**: " + ", ".join(assigned_names))
+        if dept_member_names:
+            lines.append(f"- **Department Team ({len(dept_member_names)})**: " + ", ".join(dept_member_names))
+        if active_uids:
+            active_names = [u_names[u] for u in active_uids if u in u_names]
+            lines.append(f"- **Active Contributors**: {len(active_names)} members with logged time or in-progress work.")
+        lines.append(f"- **Tasks / Cards**: {len(cards)} total.")
+        direct_answer = "\n".join(lines)
+
+    records = [{
+        "document_id": str(b_id or ""),
+        "name": b_name,
+        "text": f"Project: {b_name}; Department: {dept_name or 'N/A'}; Linked people: {len(all_uids)}; Cards: {len(cards)}"
+    }]
     return ExactResult(
-        collection="cards", total=len(cards),
-        records=[{"document_id": str(board_id or ""), "name": name,
-                  "text": f"Project: {name}; Unique assignees: {', '.join(names) or count}; "
-                          f"Cards: {len(cards)}"}],
-        conditions=f"unique assignees in project '{name}'", complete=True, source="planner", operation="count",
-        direct_answer=answer,
-        notes=[f"Counted unique users in the 'assignees' arrays of {len(cards)} cards on board '{name}'."],
+        collection="boards", total=len(all_uids), records=records,
+        conditions=f"team members in project '{b_name}'", complete=True, source="planner",
+        operation="lookup" if re.search(r"\b(?:who|list|show|give)\b", text, re.IGNORECASE) else "count",
+        direct_answer=direct_answer, timings={"db": round((time.perf_counter() - started) * 1000)}
     )
+
+
+# Backward-compatibility alias
+_assignee_count_answer = _project_or_task_team_answer
 
 
 def _mentions_self(text: str, user_id: str) -> bool:
@@ -4108,6 +4352,11 @@ def try_structured(question: str, history: list = None, current_user_id: str = N
             uncompleted_projects.context = _context(uncompleted_projects)
             uncompleted_projects.timings = {"plan": 0, **uncompleted_projects.timings}
             return uncompleted_projects
+        team_answer = _project_or_task_team_answer(question, history=history, workspace_id=workspace_id)
+        if team_answer is not None:
+            team_answer.context = _context(team_answer)
+            team_answer.timings = {"plan": round((time.perf_counter() - began) * 1000), **team_answer.timings}
+            return team_answer
         user_attr = _user_attribute_answer(question, history=history, workspace_id=workspace_id)
         if user_attr is not None:
             user_attr.timings = {"plan": round((time.perf_counter() - began) * 1000), **user_attr.timings}
