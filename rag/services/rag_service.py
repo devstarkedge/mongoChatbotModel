@@ -1032,6 +1032,7 @@ def ask(
         and (logged_time_question or (
             scope.is_admin
             and (list_mode or structured_query.mentions_collection(query_text)
+                 or structured_query.is_workspace_role_question(query_text)
                  or structured_query.is_person_lookup_question(query_text)
                  or structured_query.is_person_attribute_question(query_text))
         ))

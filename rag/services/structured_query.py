@@ -800,11 +800,11 @@ _PERSON_LOOKUP_PATTERN = re.compile(
 )
 
 _SHORT_ROLE_LOOKUP_PATTERN = re.compile(
-    r"^\s*(?:the\s+)?(admin(?:istrator)?|owner)\s+of\s+(.+?)[?.!]*\s*$",
+    r"^\s*(?:the\s+)?(admin(?:istrator)?|manager|owner)\s+of\s+(.+?)[?.!]*\s*$",
     re.IGNORECASE,
 )
 _WORKSPACE_ADMIN_PATTERN = re.compile(
-    r"^\s*(?:who\s+is\s+)?(?:the\s+)?(admin(?:istrator)?|owner)\s+of\s+(.+?)[?.!]*\s*$",
+    r"^\s*(?:who\s+(?:is|are)\s+)?(?:the\s+)?(admin(?:istrator)?|manager|owner)\s+(?:of|at|for|in)\s+(.+?)[?.!]*\s*$",
     re.IGNORECASE,
 )
 
@@ -818,8 +818,12 @@ def normalize_role_lookup_question(question: str) -> str:
     return f"who is {role} of {organization.strip()}?"
 
 
+def is_workspace_role_question(question: str) -> bool:
+    return bool(_WORKSPACE_ADMIN_PATTERN.fullmatch(question or ""))
+
+
 def _workspace_admin_answer(question: str, workspace_id=None):
-    """Resolve a workspace's owner from workspaces.owner and the referenced users record."""
+    """Resolve a workspace manager/admin from users.lastActiveWorkspace, or its owner field."""
     match = _WORKSPACE_ADMIN_PATTERN.fullmatch(question or "")
     if not match:
         return None
@@ -856,29 +860,131 @@ def _workspace_admin_answer(question: str, workspace_id=None):
         )
 
     workspace = workspaces[0]
-    owner_id = workspace.get("owner")
-    owner = None
-    if owner_id is not None:
-        owner = db["users"].find_one({"_id": {"$in": _id_variants([owner_id])}})
-
     ws_name = workspace.get("name") or workspace.get("title") or workspace_name
-    if not owner:
-        answer = f"I found the {ws_name} workspace, but its owner record couldn't be resolved."
-        records = []
+    role_key = "admin" if role.lower().startswith("admin") else role.lower()
+    users = list(db["users"].find({
+        "lastActiveWorkspace": {"$in": _id_variants([str(workspace["_id"])] )},
+        "role": {"$regex": re.escape(role_key), "$options": "i"},
+    }))
+    if not users and role_key == "owner" and workspace.get("owner") is not None:
+        owner = db["users"].find_one({"_id": {"$in": _id_variants([workspace["owner"]])}})
+        users = [owner] if owner else []
+
+    records = []
+    names = []
+    for user in users:
+        name = (user.get("name") or user.get("displayName") or user.get("fullName")
+                or user.get("full_name") or user.get("email") or str(user.get("_id")))
+        names.append(name)
+        records.append({"document_id": str(user.get("_id", "")), "name": name,
+                        "text": f"Name: {name}; Role: {user.get('role', '')}; Workspace: {ws_name}"})
+    if names:
+        answer = f"{', '.join(names)} {('is' if len(names) == 1 else 'are')} the {role.lower()}{'' if len(names) == 1 else 's'} of {ws_name}."
     else:
-        owner_name = (owner.get("name") or owner.get("displayName") or owner.get("fullName")
-                      or owner.get("full_name") or owner.get("email") or str(owner.get("_id")))
-        owner_role = owner.get("role") or "workspace owner"
-        answer = f"{owner_name} is the {role.lower()} of {ws_name}."
-        if owner.get("email"):
-            answer += f" Email: {owner['email']}."
-        records = [{"document_id": str(owner.get("_id", "")), "name": owner_name,
-                    "text": f"Name: {owner_name}; Role: {owner_role}; Workspace: {ws_name}; Workspace role: owner"}]
+        answer = f"I found the {ws_name} workspace, but couldn't find a user with the {role.lower()} role linked through lastActiveWorkspace."
 
     return ExactResult(
-        collection="workspaces + users", total=1 if owner else 0, records=records,
+        collection="workspaces + users", total=len(records), records=records,
         conditions=f"workspace owner for '{ws_name}'", complete=True,
         source="workspace-owner", operation="lookup", direct_answer=answer,
+    )
+
+
+_WORKSPACE_EMPLOYEE_COUNT_PATTERN = re.compile(
+    r"\b(?:how\s+many|count(?:\s+of)?|number\s+of|total\s+number\s+of)\s+"
+    r"(?:the\s+)?(?:employees|staff|users|members)\s+(?:are\s+)?"
+    r"(?:in|at|within|of)\s+(?:the\s+)?(.+?)\s*[?.!]*$",
+    re.IGNORECASE,
+)
+_WORKSPACE_EMPLOYEE_LIST_PATTERN = re.compile(
+    r"\b(?:list|show|give\s+me)\s+(?:the\s+)?(?:all\s+)?(?:employees|staff|users|members)\s+"
+    r"(?:in|at|within|of)\s+(?:the\s+)?(.+?)\s*[?.!]*$",
+    re.IGNORECASE,
+)
+
+
+def _workspace_employee_list_answer(question: str, is_admin: bool):
+    """List every user linked directly or through membership to a named workspace."""
+    if not is_admin:
+        return None
+    match = _WORKSPACE_EMPLOYEE_LIST_PATTERN.search((question or "").strip())
+    if not match:
+        return None
+    workspace_name = match.group(1).strip(" .,'\"!?-")
+    tokens = re.findall(r"[A-Za-z0-9]+", workspace_name)
+    if not tokens:
+        return None
+    db = mongo_service.get_db()
+    name_filter = {"$and": [{"$or": [{field: {"$regex": re.escape(token), "$options": "i"}}
+                                          for field in ("name", "title")]} for token in tokens]}
+    workspaces = list(db["workspaces"].find(name_filter).limit(10))
+    if len(workspaces) != 1:
+        return None
+    workspace = workspaces[0]
+    ws_id = str(workspace["_id"])
+    ids = _user_ids_in_workspace(db, _id_variants([ws_id]))
+    docs = list(db["users"].find({"_id": {"$in": ids}}).sort("name", 1)) if ids else []
+    names = []
+    for doc in docs:
+        converted = document_converter.convert_document("users", doc)
+        name = converted.display_name or doc.get("name") or doc.get("displayName")
+        if name and name not in names:
+            names.append(name)
+    resolved_name = workspace.get("name") or workspace.get("title") or workspace_name
+    answer = (f"There are {len(names)} employees in {resolved_name}:\n" +
+              "\n".join(f"- {name}" for name in names)) if names else f"No employees are recorded for {resolved_name}."
+    return ExactResult(collection="users", total=len(names), records=[],
+                       conditions=f"users linked to workspace '{resolved_name}'", complete=True,
+                       source="workspace-employee-list", operation="list", direct_answer=answer)
+
+
+def _workspace_employee_count_answer(question: str, is_admin: bool):
+    """Count users linked directly or through a membership record to a named workspace."""
+    if not is_admin:
+        return None
+    match = _WORKSPACE_EMPLOYEE_COUNT_PATTERN.search((question or "").strip())
+    if not match:
+        return None
+
+    workspace_name = match.group(1).strip(" .,'\"!?-")
+    tokens = re.findall(r"[A-Za-z0-9]+", workspace_name)
+    if not tokens:
+        return None
+
+    db = mongo_service.get_db()
+    name_filter = {"$and": [
+        {"$or": [
+            {field: {"$regex": re.escape(token), "$options": "i"}}
+            for field in ("name", "title")
+        ]}
+        for token in tokens
+    ]}
+    workspaces = list(db["workspaces"].find(name_filter).limit(10))
+    if not workspaces:
+        return ExactResult(
+            collection="users", total=0, records=[], conditions=f"workspace = {workspace_name}",
+            complete=True, source="workspace-employee-count", operation="count",
+            direct_answer=f"I couldn't find a workspace matching '{workspace_name}'.",
+        )
+    if len(workspaces) > 1:
+        names = [str(ws.get("name") or ws.get("title") or ws.get("_id")) for ws in workspaces]
+        return ExactResult(
+            collection="users", total=0, records=[], conditions=f"workspace = {workspace_name}",
+            complete=True, source="workspace-employee-count", operation="count",
+            direct_answer=(f"I found multiple workspaces matching '{workspace_name}': "
+                           + ", ".join(names) + ". Please specify the workspace name."),
+        )
+
+    workspace = workspaces[0]
+    workspace_id = str(workspace["_id"])
+    user_ids = _user_ids_in_workspace(db, _id_variants([workspace_id]))
+    total = _count(db["users"], {"_id": {"$in": user_ids}}) if user_ids else 0
+    resolved_name = workspace.get("name") or workspace.get("title") or workspace_name
+    return ExactResult(
+        collection="users", total=total, records=[],
+        conditions=f"users linked to workspace '{resolved_name}'", complete=True,
+        source="workspace-employee-count", operation="count",
+        direct_answer=f"There are {total} employees in the {resolved_name} workspace.",
     )
 
 
@@ -4319,6 +4425,16 @@ def try_structured(question: str, history: list = None, current_user_id: str = N
     """
     if not settings.STRUCTURED_QUERIES:
         return None
+
+    workspace_employee_list = _workspace_employee_list_answer(question, is_admin=is_admin)
+    if workspace_employee_list is not None:
+        workspace_employee_list.timings = {"plan": 0, "db": 0}
+        return workspace_employee_list
+
+    workspace_employee_count = _workspace_employee_count_answer(question, is_admin=is_admin)
+    if workspace_employee_count is not None:
+        workspace_employee_count.timings = {"plan": 0, "db": 0}
+        return workspace_employee_count
 
     leave_types = _leave_types_answer(question, workspace_id=workspace_id)
     if leave_types is not None:
