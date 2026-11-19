@@ -946,6 +946,20 @@ def ask(
             _remember(session_id, question, result, edit_index, chat_owner_id)
             return result
 
+    # Project type and status filters must be applied against live board records,
+    # before a cached or semantic result can return a loosely similar project.
+    if (settings.STRUCTURED_QUERIES and not collections
+            and structured_query.is_project_type_question(query_text)):
+        exact_projects = structured_query.try_structured(
+            query_text, history=history, current_user_id=scope.user_id,
+            is_admin=scope.is_admin, restrict_unscoped=True,
+            workspace_id=scope.workspace_id,
+        )
+        if exact_projects is not None:
+            result = _exact_answer(question, exact_projects, history)
+            _remember(session_id, question, result, edit_index, chat_owner_id)
+            return result
+
     cache_history = history
     normalized_question = question.casefold()
     # An immediate repeat should use the same context key as the original request.

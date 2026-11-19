@@ -547,6 +547,20 @@ def _uncompleted_projects_answer(question: str, workspace_id=None):
         {"name": {"$nin": [re.compile(r"^leaves?$", re.IGNORECASE)]}},
     )
     collection = db["boards"]
+    if project_type is None:
+        values = sorted(
+            {str(value).strip() for value in collection.distinct("projectType", flt)
+             if value is not None and str(value).strip()},
+            key=str.casefold,
+        )
+        answer = ("Project types: " + ", ".join(values) + ".") if values else "No project types were found."
+        return ExactResult(
+            collection="boards", total=len(values), records=[],
+            conditions="distinct projectType values in the requested workspace",
+            complete=True, source="project-type-rule", operation="list",
+            direct_answer=answer, timings={"db": 0},
+        )
+
     total = _count(collection, flt)
     docs = list(collection.find(flt).sort("name", 1).limit(settings.STRUCT_MAX_RECORDS))
     records = []
@@ -564,6 +578,80 @@ def _uncompleted_projects_answer(question: str, workspace_id=None):
         collection="boards", total=total, records=records,
         conditions="active projects with status Planning or In-Progress",
         complete=total <= len(records), source="status-rule", operation="list",
+        timings={"db": 0},
+    )
+
+
+_PROJECT_TYPE_INTENT = re.compile(
+    r"\b(?:project\s+types?|types?\s+of\s+projects?|in[- ]?house|hired\s+client)\b",
+    re.IGNORECASE,
+)
+
+
+def is_project_type_question(question: str) -> bool:
+    """Whether a project query asks for a project type or projects of a known type."""
+    return bool(_PROJECT_TYPE_INTENT.search(question or "") and _PROJECT_INTENT.search(question or ""))
+
+
+def _project_type_answer(question: str, workspace_id=None, restrict_unscoped=False,
+                         is_admin=False):
+    """Apply project type and explicit status constraints directly to boards."""
+    if not is_project_type_question(question):
+        return None
+    if restrict_unscoped and not is_admin and not workspace_id:
+        return None
+
+    db = mongo_service.get_db()
+    project_type = None
+    if re.search(r"\bin[- ]?house\b", question, re.IGNORECASE):
+        project_type = re.compile(r"^in[- ]?house$", re.IGNORECASE)
+    elif re.search(r"\bhired\s+client\b", question, re.IGNORECASE):
+        project_type = re.compile(r"^hired\s+client$", re.IGNORECASE)
+
+    flt = _and_merge(
+        _workspace_filter("boards", workspace_id, db),
+        {"name": {"$nin": [re.compile(r"^leaves?$", re.IGNORECASE)]}},
+        {"isArchived": {"$ne": True}},
+    )
+    conditions = []
+    if project_type is not None:
+        flt = _and_merge(flt, {"projectType": project_type})
+        conditions.append(f"projectType matches {project_type.pattern}")
+    if re.search(r"\b(?:completed?|done|finished|closed)\b", question, re.IGNORECASE):
+        status = re.compile(r"^(done|completed?|finished|closed)$", re.IGNORECASE)
+        flt = _and_merge(flt, {"status": status})
+        conditions.append("status is completed")
+    elif re.search(r"\b(?:pending|open|active|in[- ]progress|planning)\b", question, re.IGNORECASE):
+        status = re.compile(r"^(planning|in[- ]?progress|to[- ]?do|open|pending)$", re.IGNORECASE)
+        flt = _and_merge(flt, {"status": status})
+        conditions.append("status is planning or in-progress")
+
+    collection = db["boards"]
+    total = _count(collection, flt)
+    docs = list(collection.find(flt).sort("name", 1).limit(settings.STRUCT_MAX_RECORDS))
+    records = []
+    for doc in docs:
+        name = doc.get("name") or doc.get("title") or "Project"
+        status_value = str(doc.get("status") or "").strip()
+        type_value = str(doc.get("projectType") or "").strip()
+        description = strip_html(doc.get("description") or "")
+        records.append({
+            "document_id": str(doc.get("_id", "")),
+            "name": str(name),
+            "text": f"Name: {name}; Type: {type_value}; Status: {status_value}; Description: {description}",
+        })
+
+    qualifier = "in-house " if project_type is not None else ""
+    if re.search(r"\b(?:completed?|done|finished|closed)\b", question, re.IGNORECASE):
+        qualifier += "completed "
+    direct_answer = ""
+    if total == 0:
+        direct_answer = f"No {qualifier}projects were found matching the requested criteria."
+    return ExactResult(
+        collection="boards", total=total, records=records,
+        conditions="; ".join(conditions) or "project type query",
+        complete=total <= len(records), source="project-type-rule", operation="list",
+        direct_answer=direct_answer,
         timings={"db": 0},
     )
 
@@ -990,11 +1078,17 @@ def _workspace_employee_count_answer(question: str, is_admin: bool):
 
 def is_person_lookup_question(question: str) -> bool:
     """Whether the question asks for a person's profile by name."""
+    # The broad "tell me about <name>" form can capture project requests such as
+    # "tell me about in house projects". Let those go through the project query path.
+    if re.search(r"\b(?:projects?|boards?)\b", question or "", re.IGNORECASE):
+        return False
     return bool(_PERSON_LOOKUP_PATTERN.fullmatch(question.strip()))
 
 
 def _person_lookup(question: str, workspace_id=None):
     """Resolve a simple person question directly against user profile name fields."""
+    if re.search(r"\b(?:projects?|boards?)\b", question or "", re.IGNORECASE):
+        return None
     match = _PERSON_LOOKUP_PATTERN.fullmatch(question.strip())
     if not match:
         return None
@@ -4455,6 +4549,15 @@ def try_structured(question: str, history: list = None, current_user_id: str = N
         logged_time.context = _context(logged_time)
         logged_time.timings = {"plan": 0, **logged_time.timings}
         return logged_time
+
+    project_type_result = _project_type_answer(
+        question, workspace_id=workspace_id,
+        restrict_unscoped=restrict_unscoped, is_admin=is_admin,
+    )
+    if project_type_result is not None:
+        project_type_result.context = _context(project_type_result)
+        project_type_result.timings = {"plan": 0, **project_type_result.timings}
+        return project_type_result
 
     if restrict_unscoped and not is_admin:
         return None
