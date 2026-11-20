@@ -12,7 +12,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from . import api_serializers
-from .services import authorization_service, chat_memory, ingestion_service, rag_service
+from .services import authorization_service, chat_memory, ingestion_service, mem0_memory, rag_service
 from .services.anonymous_session import get_chat_owner
 from .services.exceptions import AuthError, ChatbotError, InvalidRequestError
 
@@ -92,6 +92,7 @@ class AskView(APIView):
                     )
                 service_edit_index = edit_index - offset
 
+            memory_identity = resolved_scope.chat_owner_id if resolved_scope else owner_id
             result = rag_service.ask(
                 data["question"],
                 top_k=data.get("top_k"),
@@ -113,11 +114,35 @@ class AskView(APIView):
                 session_id=session_id,
                 edit_index=edit_index,
             )
+            if edit_index is None and not result.get("blocked"):
+                mem0_memory.add_question(data["question"], memory_identity,
+                                         data.get("workspace_id") or None)
             return Response({
                 **result,
                 "sources": result.get("sources", []),
                 "session_id": str(session.pk),
             })
+        except ChatbotError as exc:
+            return _error_response(exc)
+
+
+class MemoryDeleteView(APIView):
+    permission_classes = [AllowAny]
+
+    def delete(self, request):
+        serializer = api_serializers.MemoryDeleteRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        try:
+            token_user_id, scope = _validate_user_token(
+                request, data.get("user_id"), data.get("email"), data["workspace_id"], return_scope=True)
+            if not token_user_id:
+                raise AuthError("A valid account token is required.")
+            if not settings.MEM0_ENABLED or not settings.MEM0_API_KEY:
+                return Response({"error": "Mem0 memory is disabled."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            if not mem0_memory.delete_all(scope.chat_owner_id, scope.workspace_id):
+                return Response({"error": "Mem0 memory deletion failed."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            return Response({"deleted": True})
         except ChatbotError as exc:
             return _error_response(exc)
 

@@ -31,6 +31,12 @@ class SearchRequestSerializer(serializers.Serializer):
     expand = serializers.BooleanField(required=False, default=False)
 
 
+class MemoryDeleteRequestSerializer(serializers.Serializer):
+    workspace_id = serializers.CharField(max_length=128, trim_whitespace=True)
+    user_id = serializers.CharField(max_length=128, required=False, allow_blank=True, trim_whitespace=True)
+    email = serializers.EmailField(max_length=254, required=False, allow_blank=True)
+
+
 class RenameChatSerializer(serializers.Serializer):
     title = serializers.CharField(max_length=120, trim_whitespace=True)
 

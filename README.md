@@ -113,6 +113,11 @@ pip install -r requirements.txt
 
 ### 2. Configure Environment (`.env`)
 Copy `.env.example` to `.env` and verify your settings:
+
+Optional cross-chat preferences use Mem0 Platform. Install the requirements, set `MEM0_ENABLED=true`, and configure `MEM0_API_KEY` from your Mem0 dashboard. The integration stores only user questions and scopes memories by account and workspace; retrieved memories are context only, never evidence for MongoDB facts or permissions. See the [Mem0 Python quickstart](https://docs.mem0.ai/platform/quickstart).
+
+To clear saved memories for one workspace, send `DELETE /api/v1/memories/` with that `workspace_id` and the account's bearer token. This endpoint requires Mem0 to be enabled.
+
 ```ini
 # MongoDB
 MONGO_URI=mongodb+srv://<username>:<password>@cluster0.mongodb.net/?retryWrites=true&w=majority

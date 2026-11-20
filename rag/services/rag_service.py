@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 from django.conf import settings
 
 from . import (action_guard, cache_service, embedding_service, embedding_store, llm_service, retrieval,
-               chat_memory, structured_query, vector_index, query_correction, authorization_service)
+               chat_memory, mem0_memory, structured_query, vector_index, query_correction, authorization_service)
 from .exceptions import AuthorizationError, ChatbotError, InvalidRequestError, LLMError
 from .llm_service import NOT_FOUND_ANSWER
 from .structured_query import _sanitize_ids, _HEX24_STANDALONE
@@ -455,11 +455,14 @@ def _source(group, related=False) -> dict:
 
 
 def _verify_sources(sources: list[dict], allowed_ids: set[str] | None) -> list[dict]:
-    """Keep only sources whose embedding ID is in allowed_ids."""
+    """Keep only sources with at least one chunk ID in the caller's allowed set."""
     if allowed_ids is None:
         return sources
-    filtered = [s for s in sources if s.get("document_id") in allowed_ids]
-    return filtered
+    return [
+        source for source in sources
+        if any(doc_id.startswith(f"{source.get('collection')}:{source.get('document_id')}:")
+               for doc_id in allowed_ids)
+    ]
 
 
 def _distinct_person_sources(sources: list[dict]) -> list[dict]:
@@ -967,8 +970,9 @@ def ask(
            " ".join(cache_history[-1]["question"].split()).casefold() == normalized_question):
         cache_history = cache_history[:-1]
     history_key = tuple((turn["question"], turn["answer"]) for turn in cache_history)
+    memory_context = mem0_memory.search(question, scope.chat_owner_id, scope.workspace_id)
     cache_key = (scope.cache_key, session_id, normalized_question, top_k, tuple(sorted(collections or [])), hops,
-                 history_key, vector_index.current_version())
+                 history_key, memory_context, vector_index.current_version())
     cached = _answer_cache.get(cache_key)
     if cached is not None:
         result = copy.deepcopy(cached)
@@ -1097,7 +1101,7 @@ def ask(
         include_logged_time=structured_query.wants_logged_time(question),
     )
     answer = llm_service.generate(question, context, max_tokens=settings.LIST_MAX_TOKENS if list_mode else None,
-                                  history=history)
+                                  history=history, memory_context=memory_context)
     answer = _sanitize_ids(redact_sensitive_text(_strip_blank_bullet_lines(answer)))
     mark("llm")
 

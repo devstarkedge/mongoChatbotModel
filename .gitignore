@@ -11,6 +11,12 @@
 *.key
 cookies.txt
 
+# skills
+
+.agents/
+.claude/
+agent/
+
 # Virtual Environments
 ven/
 venv/
