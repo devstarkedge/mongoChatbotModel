@@ -46,7 +46,7 @@ _GEMINI = LLM_PROVIDER == "gemini"      # Google Gemini through its OpenAI-compa
 # ------------------------------------------------------------------ Django
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-only-insecure-key-change-me")
 CHAT_JWT_SECRET = os.getenv("JWT_SECRET", "")
-DEBUG = _bool("DJANGO_DEBUG", True)
+DEBUG = _bool("DJANGO_DEBUG", not bool(os.getenv("RENDER")))
 ALLOWED_HOSTS = _list("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1,.onrender.com")
 _render_host = os.getenv("RENDER_EXTERNAL_HOSTNAME")
 if _render_host and _render_host not in ALLOWED_HOSTS:
@@ -422,6 +422,6 @@ LLM_FALLBACK_TIMEOUT = _int("LLM_FALLBACK_TIMEOUT", LLM_TIMEOUT)
 CACHE_TTL_SECONDS = _int("CACHE_TTL_SECONDS", 0)   # 0 disables the answer cache
 # CACHE_TTL_SECONDS = _int("CACHE_TTL_SECONDS", 600) 
 CACHE_MAX_ENTRIES = _int("CACHE_MAX_ENTRIES", 500)
-MEM0_ENABLED = _bool("MEM0_ENABLED", False)
+MEM0_ENABLED = _bool("MEM0_ENABLED", True)
 MEM0_API_KEY = os.getenv("MEM0_API_KEY", "").strip()
 WARMUP_ON_START = _bool("WARMUP_ON_START", True)

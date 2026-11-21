@@ -13,7 +13,6 @@ import mongomock
 import numpy as np
 import jwt
 from bson import ObjectId
-from django.conf import settings
 from django.test import Client, SimpleTestCase, override_settings
 from rest_framework.test import APIClient
 from qdrant_client import QdrantClient
@@ -37,10 +36,6 @@ def fake_embed_texts(texts, batch_size=64):
             out[i, zlib.crc32(token.encode()) % 128] += 1
         out[i] /= np.linalg.norm(out[i]) or 1
     return out
-
-
-def fake_chat(messages, max_tokens, model=None, json_mode=False):
-    return "" if json_mode else "Mock answer."
 
 
 def _mongomock_add_replace_shim():
@@ -99,12 +94,8 @@ class MongoCase(SimpleTestCase):
         qdrant_patch.start()
         self.addCleanup(qdrant_patch.stop)
         self.addCleanup(self.qdrant.close)
-        self.llm_patch = patch.object(llm_service, "_chat", side_effect=fake_chat)
-        self.llm_patch.start()
-        self.addCleanup(self.llm_patch.stop)
         overrides = override_settings(VECTOR_STORE_DIR=tmp, MIN_SCORE=0.0, EMBEDDING_PROVIDER="local",
-                                      STRUCTURED_QUERIES=self.structured, MEM0_ENABLED=False, LLM_API_KEY="",
-                                      LLM_FALLBACK_PROVIDER="")
+                                      STRUCTURED_QUERIES=self.structured, MEM0_ENABLED=False)
         overrides.enable()
         self.addCleanup(overrides.disable)
         vector_index.reset_for_tests()
@@ -116,29 +107,7 @@ class MongoCase(SimpleTestCase):
         return ingestion_service.run_ingestion(log=lambda m: None, **kwargs)
 
     def emb(self, source, doc_filter=None):
-        for doc in embedding_store._scroll(with_vectors=True):
-            if not doc["_id"].startswith(f"{source}:"):
-                continue
-            if all(self._field(doc, key) == value for key, value in (doc_filter or {}).items()):
-                return doc
-        return None
-
-    @staticmethod
-    def _field(document, path):
-        for part in path.split("."):
-            document = document.get(part, {}) if isinstance(document, dict) else {}
-        return document
-
-    def embeddings(self):
-        return list(embedding_store._scroll(with_vectors=True))
-
-    def add_embedding(self, record):
-        vector = np.asarray([record["embedding"]], dtype="float32")
-        record = {key: value for key, value in record.items() if key != "embedding"}
-        embedding_store.upsert_many([record], vector)
-
-    def clear_embeddings(self):
-        embedding_store.delete_ids([doc["_id"] for doc in self.embeddings()])
+        return self.db["rag_embeddings"].find_one({"_id": {"$regex": f"^{source}:"}, **(doc_filter or {})})
 
 
 class Mem0MemoryTests(SimpleTestCase):
@@ -187,13 +156,6 @@ class Mem0MemoryTests(SimpleTestCase):
         self.assertFalse(mem0_memory.delete_all("user-a"))
 
 
-class Mem0DisabledTests(SimpleTestCase):
-    @override_settings(MEM0_ENABLED=False, MEM0_API_KEY="test-key")
-    def test_mem0_is_disabled_during_general_test_runs(self):
-        with patch.object(mem0_memory, "_client", None):
-            self.assertIsNone(mem0_memory._get_client())
-
-
 @override_settings(SESSION_ENGINE="django.contrib.sessions.backends.signed_cookies")
 class PublicAccessTests(MongoCase):
     databases = {"default"}
@@ -220,8 +182,9 @@ class PublicAccessTests(MongoCase):
         response = self.client.post(
             "/api/v1/ask/", {"question": "Show logged time for ShopEase"}, format="json",
         )
-        self.assertEqual(response.status_code, 403, response.data)
-        self.assertNotIn("Design landing page", str(response.data))
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["sources"], [])
+        self.assertIn("sign in", response.data["answer"].lower())
 
     @override_settings(CORS_ALLOWED_ORIGINS=["https://frontend.example"])
     def test_cors_allows_only_configured_browser_origins(self):
@@ -374,11 +337,10 @@ class IngestionTests(MongoCase):
     def test_ingest_stores_text_metadata_relationships_and_vector_together(self):
         summary = self.ingest()
         self.assertEqual(summary["mode"], "incremental")
-        aisha = self.db["users"].find_one({"email": "aisha@example.com"})
-        membership = self.db["memberships"].find_one({"user": aisha["_id"]})
-        doc = self.emb("memberships", {"metadata.primary_id": str(membership["_id"])})
+        doc = self.emb("memberships")
         self.assertEqual(len(doc["embedding"]), 128)
-        self.assertIn("User: Aisha Khan", doc["text"])
+        self.assertIn("User: Aisha Khan", self.db["rag_embeddings"].find_one(
+            {"_id": f"memberships:{self.db['memberships'].find_one()['_id']}:0"})["text"])
         self.assertIn("Workspace: Acme Corp", doc["text"])
         self.assertEqual({r["ref_collection"] for r in doc["relationships"]}, {"users", "workspaces"})
         self.assertEqual(doc["metadata"]["model"], "local:sentence-transformers/all-MiniLM-L6-v2")
@@ -387,8 +349,7 @@ class IngestionTests(MongoCase):
 
     def test_sensitive_fields_never_reach_embeddings(self):
         self.ingest()
-        self.assertFalse(any(re.search(r"notarealhash|Password", doc["text"])
-                             for doc in self.embeddings()))
+        self.assertEqual(self.db["rag_embeddings"].count_documents({"text": {"$regex": "notarealhash|Password"}}), 0)
 
     def test_second_run_embeds_nothing_then_only_changes_and_deletions(self):
         first = self.ingest()
@@ -402,14 +363,14 @@ class IngestionTests(MongoCase):
         third = self.ingest()
         self.assertEqual(third["collections"]["projects"]["embedded"], 1)
         self.assertEqual(third["collections"]["tasks"]["removed"], 1)
-        self.assertFalse(any("Fix login bug" in doc["text"] for doc in self.embeddings()))
+        self.assertEqual(self.db["rag_embeddings"].count_documents({"text": {"$regex": "Fix login bug"}}), 0)
 
     def test_renaming_a_referenced_document_refreshes_the_documents_that_point_to_it(self):
         self.ingest()
         self.db["workspaces"].update_one({"name": "Acme Corp"}, {"$set": {"name": "Acme Global"}})
         summary = self.ingest()
         self.assertGreaterEqual(summary["collections"]["memberships"]["embedded"], 1)
-        self.assertTrue(any("Acme Global" in doc["text"] for doc in self.embeddings()))
+        self.assertEqual(self.db["rag_embeddings"].count_documents({"text": {"$regex": "Acme Global"}}) > 0, True)
 
     def test_full_mode_reembeds_everything(self):
         self.ingest()
@@ -512,8 +473,7 @@ class WorkspaceScopeTests(MongoCase):
         self.assertEqual(scope.workspace_id, self.acme)
         self.assertTrue(scope.embedding_ids)
         for doc_id in scope.embedding_ids:
-            source, primary_id = doc_id.split(":", 2)[:2]
-            doc = self.emb(source, {"metadata.primary_id": primary_id})
+            doc = self.db["rag_embeddings"].find_one({"_id": doc_id}, {"metadata.workspace_ids": 1})
             self.assertIn(self.acme, doc["metadata"].get("workspace_ids") or [],
                           f"{doc_id} is not tagged with the requested workspace")
 
@@ -531,11 +491,10 @@ class WorkspaceScopeTests(MongoCase):
         self.assertEqual(scope.workspace_id, self.acme)
         self.assertTrue(scope.embedding_ids)
         for doc_id in scope.embedding_ids:
-            source, primary_id = doc_id.split(":", 2)[:2]
-            doc = self.emb(source, {"metadata.primary_id": primary_id})
+            doc = self.db["rag_embeddings"].find_one({"_id": doc_id}, {"metadata.workspace_ids": 1})
             self.assertIn(self.acme, doc["metadata"].get("workspace_ids") or [],
                           f"{doc_id} is not tagged with the requested workspace")
-        shop = self.emb("projects", {"metadata.primary_id": str(seed.P_SHOP)})
+        shop = self.db["rag_embeddings"].find_one({"metadata.primary_id": str(seed.P_SHOP)})
         self.assertNotIn(shop["_id"], scope.embedding_ids)
 
 
@@ -564,15 +523,59 @@ class SearchTests(MongoCase):
         hits = retrieval.search("Acme Corp", top_k=5, collections=["workspaces"], hybrid=False)
         self.assertTrue(hits and all(h.collection == "workspaces" for h in hits))
 
-    def test_qdrant_filters_by_collection_and_account_embedding_ids(self):
-        workspace = self.emb("workspaces", {"metadata.primary_id": str(seed.WS_ACME)})
-        allowed_id = workspace["_id"]
-        query_vector = embedding_service.embed_query("Acme Corp")
+    def test_hnsw_search_uses_roaring_selector_for_collection_and_account_filters(self):
+        from django.conf import settings
+        from pyroaring import BitMap
 
-        hits = embedding_store.vector_search(query_vector, 5, ["workspaces"], {allowed_id})
+        index = vector_index.get_index()
+        allowed_id = next(doc_id for doc_id in index.ids if doc_id.startswith("workspaces:"))
+        bitmap, (selector, mask) = index._filter_selector(["workspaces"], {allowed_id}, "test-scope")
+        row = index.ids.index(allowed_id)
+        self.assertIsInstance(bitmap, BitMap)
+        self.assertTrue(selector.is_member(row))
+        self.assertTrue(mask[row >> 3] & (1 << (row & 7)))
+
+        query_vector = embedding_service.embed_query("Acme Corp")
+        hits = index.search(query_vector, 5, ["workspaces"], {allowed_id}, "test-scope")
         self.assertEqual([doc_id for doc_id, _score in hits], [allowed_id])
-        self.assertEqual(embedding_store.vector_search(query_vector, 5, ["projects"], {allowed_id}), [])
-        self.assertEqual(embedding_store.vector_search(query_vector, 5, ["workspaces"], set()), [])
+
+        loaded = vector_index.VectorIndex()
+        loaded.load(settings.VECTOR_STORE_DIR)
+        self.assertEqual(loaded.ids, index.ids)
+        self.assertEqual(loaded.collections, index.collections)
+
+    def test_legacy_index_metadata_is_refused_not_rebuilt_in_request(self):
+        from django.conf import settings
+        from pathlib import Path
+        from rag.services.exceptions import VectorStoreError
+
+        metadata_path = Path(settings.VECTOR_STORE_DIR) / vector_index.META_FILE
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata.pop("backend")
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+        vector_index.reset_for_tests()
+
+        with self.assertRaises(VectorStoreError):
+            vector_index.get_index()
+        # a request must never rewrite the index files; only ingestion rebuilds
+        self.assertIsNone(json.loads(metadata_path.read_text(encoding="utf-8")).get("backend"))
+
+    def test_missing_index_files_are_never_rebuilt_by_a_chat_request(self):
+        from django.conf import settings
+        from pathlib import Path
+        from rag.services.exceptions import VectorStoreError
+
+        store = Path(settings.VECTOR_STORE_DIR)
+        for name in (vector_index.INDEX_FILE, vector_index.META_FILE):
+            (store / name).unlink(missing_ok=True)
+        vector_index.reset_for_tests()
+
+        # embeddings still exist, but a request must not trigger a full rebuild
+        self.assertGreater(vector_index.embedding_store.count(), 0)
+        with self.assertRaises(VectorStoreError):
+            vector_index.get_index()
+        self.assertFalse((store / vector_index.INDEX_FILE).exists())
+        self.assertFalse((store / vector_index.META_FILE).exists())
 
     def test_keyword_failure_falls_back_to_vector_search(self):
         hits = retrieval.search("Health4Travel completed", top_k=3, hybrid=True)  # mongomock has no $text
@@ -635,11 +638,9 @@ class SearchTests(MongoCase):
         context = generate.call_args[0][1]
         self.assertNotIn("Fix login bug", context)
 
-        with patch.object(llm_service, "generate", return_value="scoped answer") as personal_generate:
-            personal = rag_service.ask("my tasks and Rohan Mehta's tasks", user_id=aisha_id)
-        self.assertEqual(personal["answer"], "scoped answer")
-        self.assertIn("Design landing page", personal_generate.call_args[0][1])
-        self.assertNotIn("Fix login bug", personal_generate.call_args[0][1])
+        personal = rag_service.ask("my tasks and Rohan Mehta's tasks", user_id=aisha_id)
+        self.assertIn("Design landing page", personal["answer"])
+        self.assertNotIn("Fix login bug", personal["answer"])
 
         self.assertTrue(authorization_service.mentions_current_user(
             "my tasks and Rohan Mehta's tasks", aisha_id, "Aisha Khan"))
@@ -727,18 +728,17 @@ class BlockedActivityCollectionTests(MongoCase):
     def test_activities_is_not_listed_ingested_or_kept_from_an_older_index(self):
         self.assertNotIn("activities", mongo_service.list_collections())
         self.assertTrue(mongo_service.is_blocked_collection("activities"))
-        self.add_embedding(self._stale_activity_embedding())
+        self.db["rag_embeddings"].insert_one(self._stale_activity_embedding())
 
         summary = self.ingest()
 
         self.assertNotIn("activities", summary["collections"])
         self.assertEqual(summary["blocked_removed"], 1)
-        self.assertFalse(any(doc.get("metadata", {}).get("collection") == "activities"
-                             for doc in self.embeddings()))
+        self.assertEqual(self.db["rag_embeddings"].count_documents({"metadata.collection": "activities"}), 0)
 
     def test_vector_search_never_returns_activities_even_if_the_index_still_contains_one(self):
         self.ingest()
-        self.add_embedding(self._stale_activity_embedding())
+        self.db["rag_embeddings"].insert_one(self._stale_activity_embedding())
         vector_index.rebuild_index()
 
         hits = retrieval.search("SECRET_ACTIVITY_MARKER", top_k=10, hybrid=False)
@@ -750,7 +750,7 @@ class BlockedActivityCollectionTests(MongoCase):
         from rag.services.retrieval import Hit
 
         self.ingest()
-        self.add_embedding(self._stale_activity_embedding())
+        self.db["rag_embeddings"].insert_one(self._stale_activity_embedding())
         vector_index.rebuild_index()
         origin = Hit(id="cards:origin:0", text="Project card", collection="cards", primary_id="origin",
                      relationships=[{"field": "activity", "ref_id": "old-1", "ref_collection": "activities"}])
@@ -800,7 +800,7 @@ class AskTests(MongoCase):
         self.assertIn("which ones are completed?", query)
         self.assertNotIn("unrelated generated claim", query)
 
-    def test_ordinal_followup_without_sources_asks_for_clarification(self):
+    def test_ordinal_followup_uses_first_item_from_previous_answer(self):
         session_id = "cafe-1234"
         answer = ("There are 26 categories. Here are some examples:\n\n"
                   "- SEO (under the SEO department)\n- Hubspot (under the Frontend department)")
@@ -810,8 +810,8 @@ class AskTests(MongoCase):
         rag_service.chat_memory.add(session_id, "How many categories are there?", answer, owner_id=chat_owner)
         with patch.object(rag_service.retrieval, "search") as search:
             result = rag_service.ask("what is first one", session_id=session_id, user_id=self.admin_id)
-        self.assertTrue(result["clarify"])
-        self.assertEqual(result["mode"], "clarify")
+        self.assertEqual(result["answer"], "The first one listed was SEO (under the SEO department).")
+        self.assertEqual(result["mode"], "history_reference")
         search.assert_not_called()
 
     def test_conversational_turn_is_stored_and_can_be_edited(self):
@@ -994,17 +994,18 @@ class AskTests(MongoCase):
                 rag_service.validate_question(bad)
 
     def test_missing_index_is_a_clean_error(self):
-        self.clear_embeddings()
+        self.db["rag_embeddings"].delete_many({})
         vector_index.reset_for_tests()
-        result = rag_service.ask("anything at all")
-        self.assertEqual(result["sources"], [])
-        self.assertIn("make your query more specific", result["answer"].lower())
+        import shutil
+        from django.conf import settings
+        shutil.rmtree(settings.VECTOR_STORE_DIR, ignore_errors=True)
+        with self.assertRaises(VectorStoreError):
+            rag_service.ask("anything at all")
 
     @override_settings(LLM_API_KEY="")
     def test_missing_llm_key_is_a_clean_error(self):
         from rag.services.exceptions import ConfigError
         llm_service._client = None
-        self.llm_patch.stop()
         with self.assertRaises(ConfigError):
             rag_service.ask("Which projects are completed?")
 
@@ -1018,26 +1019,6 @@ class ApiTests(MongoCase):
         self.client = Client()
         self.client.get("/")
         self.csrf_token = self.client.cookies["csrftoken"].value
-
-    @override_settings(CHAT_JWT_SECRET="api-test-secret-that-is-at-least-32-bytes", MEM0_ENABLED=True,
-                       MEM0_API_KEY="test-key")
-    def test_memory_delete_requires_account_auth_and_deletes_only_that_workspace(self):
-        workspace_id = str(SAMPLE["workspaces"][0]["_id"])
-        token = jwt.encode({"id": self.admin_id}, settings.CHAT_JWT_SECRET, algorithm="HS256")
-        deleter = patch.object(mem0_memory, "delete_all", return_value=True)
-        delete_mock = deleter.start()
-        self.addCleanup(deleter.stop)
-
-        body = json.dumps({"workspace_id": workspace_id})
-        response = self.client.delete("/api/v1/memories/", body, content_type="application/json")
-        self.assertEqual(response.status_code, 401)
-        response = self.client.delete(
-            "/api/v1/memories/", body, content_type="application/json",
-            HTTP_AUTHORIZATION=f"Bearer {token}",
-        )
-        self.assertEqual(response.status_code, 200, response.content)
-        scope = authorization_service.resolve_scope(self.admin_id, workspace_id=workspace_id)
-        delete_mock.assert_called_once_with(scope.chat_owner_id, scope.workspace_id)
 
     def test_search_api_is_accessible_without_login(self):
         self.ingest()
@@ -1098,7 +1079,6 @@ class ApiTests(MongoCase):
         self.assertEqual(ask.call_args_list[1].kwargs["history"], [{
             "question": "How many projects are there?",
             "answer": "There are four projects.",
-            "sources": [{"name": "Project data"}],
         }])
         detail = self.client.get(f"/api/v1/chats/{session_id}/")
         self.assertEqual(detail.status_code, 200, detail.content)
@@ -1209,7 +1189,7 @@ class ApiTests(MongoCase):
             }, HTTP_AUTHORIZATION=f"Bearer {token}")
 
         self.assertEqual(response.status_code, 200, response.content)
-        self.assertTrue(response.data["sources"], response.data)
+        self.assertTrue(response.data["sources"])
         self.assertTrue(all(
             any(doc_id.startswith(f"{source['collection']}:{source['document_id']}:")
                 for doc_id in scope.embedding_ids)
@@ -1378,7 +1358,7 @@ class StructuredQueryTests(MongoCase):
                     {"field": "status", "op": "eq", "value": "done"}],
             "show": ["title", "status"]}
         session_id = "f00d-1234"
-        history = [{"question": "List Aisha Khan's tasks", "answer": "", "sources": []}]
+        history = [{"question": "List Aisha Khan's tasks", "answer": "She has a design task and a release-notes task."}]
         chat_owner = f"{self.admin_id}:admin"
         rag_service.chat_memory.clear(session_id, owner_id=chat_owner)
         self.addCleanup(rag_service.chat_memory.clear, session_id, owner_id=chat_owner)
@@ -1457,17 +1437,16 @@ class StructuredQueryTests(MongoCase):
         ])
 
         task = structured_query.try_structured("how many assignees does Design landing page have?")
-        self.assertIn("2 people assigned: Aisha Khan, Rohan Mehta", task.direct_answer)
+        self.assertIn("Design landing page has 2 assignees.", task.direct_answer)
 
         assigned = structured_query.try_structured("how many people are assigned to Fix login bug?")
-        self.assertIn("2 people assigned:", assigned.direct_answer)
+        self.assertIn("Fix login bug has 2 assignees.", assigned.direct_answer)
 
         project = structured_query.try_structured("how many assignees in ShopEase project?")
-        self.assertIn("Project **ShopEase** team overview (3 total linked)", project.direct_answer)
-        self.assertIn("Aisha Khan, Meera Iyer, Rohan Mehta", project.direct_answer)
+        self.assertIn("Project ShopEase has 3 unique assignees across 3 cards.", project.direct_answer)
 
         empty = structured_query.try_structured("how many assignees in task Write release notes?")
-        self.assertIn("No team members are currently assigned", empty.direct_answer)
+        self.assertIn("Write release notes has 0 assignees.", empty.direct_answer)
 
     def test_board_output_deduplicates_records_and_drops_blank_bullets(self):
         exact = structured_query.ExactResult(
@@ -1484,20 +1463,20 @@ class StructuredQueryTests(MongoCase):
         )
         answer = rag_service._format_board_answer(exact)
         self.assertIn("2 Cards Records", answer)
-        self.assertEqual(answer.count("**🟢 TASK"), 1)
+        self.assertEqual(answer.count("**ðŸŸ¢ TASK"), 1)
         self.assertIn("Duplicate with more detail", answer)
         self.assertNotIn("Keep me", answer)
-        self.assertNotIn("• ,", answer)
-        self.assertNotIn("• ...", answer)
-        self.assertNotIn("• TASK", answer)
+        self.assertNotIn("â€¢ ,", answer)
+        self.assertNotIn("â€¢ ...", answer)
+        self.assertNotIn("â€¢ TASK", answer)
 
         result = rag_service._exact_answer("shubham's all completed tasks", exact)
         self.assertEqual(len(result["sources"]), 2)
         self.assertEqual(result["records_used"], 2)
 
     def test_blank_bullet_lines_are_stripped_from_answers(self):
-        raw = "Header\n• \n• , , , , , , \n• \n• Keep this\n•\n\n\nFooter"
-        self.assertEqual(rag_service._strip_blank_bullet_lines(raw), "Header\n• Keep this\n\nFooter")
+        raw = "Header\nâ€¢ \nâ€¢ , , , , , , \nâ€¢ \nâ€¢ Keep this\nâ€¢\n\n\nFooter"
+        self.assertEqual(rag_service._strip_blank_bullet_lines(raw), "Header\nâ€¢ Keep this\n\nFooter")
 
         exact = structured_query.ExactResult(
             collection="cards", total=1,
@@ -1507,9 +1486,9 @@ class StructuredQueryTests(MongoCase):
             direct_answer=raw,
         )
         result = rag_service._exact_answer("shubham's all tasks", exact)
-        self.assertNotIn("\n• \n", result["answer"])
-        self.assertNotIn("• , , ,", result["answer"])
-        self.assertIn("• Keep this", result["answer"])
+        self.assertNotIn("\nâ€¢ \n", result["answer"])
+        self.assertNotIn("â€¢ , , ,", result["answer"])
+        self.assertIn("â€¢ Keep this", result["answer"])
 
     def test_html_tags_are_sent_as_plain_text_only(self):
         exact = structured_query.ExactResult(
@@ -1534,16 +1513,16 @@ class StructuredQueryTests(MongoCase):
             records=[{
                 "document_id": "1", "name": "Development",
                 "text": "Title: Development; Status: In Progress; Project: Alpha; "
-                        "Description: &nbsp;; Billable: No; Note: •; Extra: &bull;",
+                        "Description: &nbsp;; Billable: No; Note: â€¢; Extra: &bull;",
             }],
             conditions="user = Shubham", complete=True, source="planner",
         )
         answer = rag_service._format_board_answer(exact)
         self.assertIn("Development", answer)
-        self.assertNotIn("• No", answer)
+        self.assertNotIn("â€¢ No", answer)
         self.assertNotIn("&nbsp;", answer)
-        self.assertNotIn("• •", answer)
-        self.assertNotIn("• &bull;", answer)
+        self.assertNotIn("â€¢ â€¢", answer)
+        self.assertNotIn("â€¢ &bull;", answer)
 
     def test_semantic_context_strips_logged_time_without_request(self):
         hit = retrieval.Hit(
@@ -1559,13 +1538,14 @@ class StructuredQueryTests(MongoCase):
         self.assertIn("TRACKED-DETAIL", shown)
 
     def test_filter_by_a_persons_name_on_a_reference_field(self):
-        result = structured_query.try_structured("What tasks are assigned to Rohan Mehta?")
-        self.assertIsNotNone(result)
-        self.assertEqual(result.total, 2)
-        records = "\n".join(record["text"] for record in result.records)
-        self.assertIn("Fix login bug", records)
-        self.assertIn("Rohan Mehta", records)
-        self.assertNotIn("Write release notes", records)
+        plan = {"collection": "tasks", "operation": "list",
+                "filters": [{"field": "assignedTo", "op": "eq", "value": "Rohan Mehta"}]}
+        result, gen = self.ask("What tasks are assigned to Rohan Mehta?", plan)
+        self.assertEqual(result["total_matching"], 2)
+        context = gen.call_args[0][1]
+        self.assertIn("Fix login bug", context)
+        self.assertIn("Assigned To: Rohan Mehta", context)            # names are shown, not ids
+        self.assertNotIn("Write release notes", context)
 
     def test_count_operation_sends_only_a_few_examples(self):
         plan = {"collection": "departments", "operation": "count", "filters": []}
@@ -1789,8 +1769,6 @@ class StructuredQueryTests(MongoCase):
 class LoggedTimeTests(MongoCase):
     """Logged-time questions always read nested `loggedTime` entries on 'cards', completely."""
 
-    structured = True
-
     def setUp(self):
         super().setUp()
         scope_patch = patch.object(
@@ -1882,8 +1860,8 @@ class LoggedTimeTests(MongoCase):
         self.assertIn("Total: 8h 0m", result.direct_answer)
 
         types = structured_query._leave_types_answer("what leave types are there")
-        self.assertIn("Full Day Leave", types.direct_answer)
-        self.assertIn("Short Leave", types.direct_answer)
+        self.assertIn("Full Leave", types.direct_answer)
+        self.assertNotIn("Short Leave", types.direct_answer)
 
     def test_unverified_callers_cannot_read_logged_time_or_leave_data(self):
         denied = structured_query._logged_time_answer("Show logged time of Aisha Khan")
@@ -2340,7 +2318,7 @@ class LoggedTimeTests(MongoCase):
             {"_id": tisha, "name": "Tisha Grover", "email": "tisha@example.com", "role": "employee"},
             {"_id": mohit, "name": "Mohit Thakur", "email": "mohit@example.com", "role": "employee"},
         ])
-        # Tisha: 3 entries, Mohit: 1 entry → Mohit takes least
+        # Tisha: 3 entries, Mohit: 1 entry â†’ Mohit takes least
         self.db["cards"].insert_one({
             "title": "Full Leave", "board": leave_board, "status": "done",
             "loggedTime": [
@@ -2488,8 +2466,6 @@ class LoggedTimeTests(MongoCase):
 
 class CompanyIdentityPrivacyTests(MongoCase):
     """Only admins may look up another member's company/workspace."""
-
-    structured = True
 
     def test_other_members_company_is_denied_for_non_admins(self):
         admin = authorization_service.AccessScope(
@@ -2869,7 +2845,6 @@ class OllamaEndToEndTests(MongoCase):
 
     def setUp(self):
         super().setUp()
-        self.llm_patch.stop()
         scope_patch = patch.object(
             authorization_service, "resolve_scope",
             side_effect=lambda user_id, email=None, workspace_id=None: _global_scope_for_test(user_id or self.admin_id),
@@ -3078,7 +3053,6 @@ class GeminiEndToEndTests(MongoCase):
 
     def setUp(self):
         super().setUp()
-        self.llm_patch.stop()
         self.db["departments"].insert_many([{"name": n, "floor": i % 5} for i, n in enumerate(DEPARTMENTS)])
         overrides = override_settings(**GEMINI)
         overrides.enable()

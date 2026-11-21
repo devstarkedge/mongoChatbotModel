@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: mongo-rag-chatbot
+    runtime: python
+    buildCommand: bash build.sh
+    startCommand: gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --timeout 120
+    healthCheckPath: /api/v1/health/
+    envVars:
+      - key: DJANGO_DEBUG
+        value: "false"
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+      - key: MONGO_URI
+        sync: false
+      - key: MONGO_DATABASE
+        sync: false
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
+      - key: LLM_PROVIDER
+        value: gemini
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: INGEST_TOKEN
+        generateValue: true
+      - key: MEM0_ENABLED
+        value: "true"
+      - key: MEM0_API_KEY
+        sync: false
