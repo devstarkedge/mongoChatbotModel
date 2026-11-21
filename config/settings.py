@@ -58,7 +58,13 @@ CSRF_TRUSTED_ORIGINS = _list(
 )
 if _render_host:
     CSRF_TRUSTED_ORIGINS.append(f"https://{_render_host}")
-INSTALLED_APPS = INSTALLED_APPS = [
+
+if not DEBUG:
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+    X_FRAME_OPTIONS = "DENY"
+
+INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -370,8 +376,7 @@ LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://generativelanguage.googleapis.
                          else "https://api.groq.com/openai/v1")
 
 
-LLM_MODEL = os.getenv("LLM_MODEL", "gemma3:4b" if _LOCAL else "gemini-3.5-flash-lite" if _GEMINI else "openai/gpt-oss-20b")
-LLM_TEMPERATURE = os.getenv("LLM_TEMPERATURE", "" if _GEMINI else "0")   # never sent to Gemini (deprecated there)   # empty = provider default
+LLM_MODEL = (os.getenv("LLM_MODEL") or "").strip() or ("gemma3:4b" if _LOCAL else "gemini-3.5-flash-lite" if _GEMINI else "openai/gpt-oss-20b")
 LLM_TEMPERATURE = _float("LLM_TEMPERATURE", 0.0) if not _GEMINI else None
 
 
