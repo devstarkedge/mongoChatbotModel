@@ -20,12 +20,16 @@ def request_log_middleware(get_response):
         async def middleware(request):
             started = perf_counter()
             response = await get_response(request)
+            if request.method == "HEAD" and hasattr(response, "content"):
+                response.content = b""
             _log(request, response, started)
             return response
     else:
         def middleware(request):
             started = perf_counter()
             response = get_response(request)
+            if request.method == "HEAD" and hasattr(response, "content"):
+                response.content = b""
             _log(request, response, started)
             return response
     return middleware

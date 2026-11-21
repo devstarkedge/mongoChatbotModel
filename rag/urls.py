@@ -7,6 +7,7 @@ urlpatterns = [
     path("", views.index, name="index"),  # Home page / UI entry point
     path("api/v1/ask/", api_views.AskView.as_view(), name="api_ask"),  # Ask a question and get an AI answer (with RAG)
     path("ask/", api_views.AskView.as_view(), name="ask_alias"),  # Alias of ask endpoint (same task)
+    path("health/", api_views.HealthView.as_view(), name="health_alias"),  # Alias for health check
     path("api/v1/search/", api_views.SearchView.as_view(), name="api_search"),  # Semantic search over documents
     path("api/v1/memories/", api_views.MemoryDeleteView.as_view(), name="api_memories_delete"),
     path("api/v1/health/", api_views.HealthView.as_view(), name="api_health"),  # Service health check
