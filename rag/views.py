@@ -1,13 +1,12 @@
-from django.http import HttpResponse
-from django.shortcuts import render
-from django.views.decorators.csrf import ensure_csrf_cookie
-
-from .services.anonymous_session import get_chat_owner
+from django.http import HttpResponse, JsonResponse
 
 
-@ensure_csrf_cookie
 def index(request):
-    get_chat_owner(request)
+    """API-only root. Returns JSON info for GET, empty 200 for HEAD (UptimeRobot)."""
     if request.method == "HEAD":
         return HttpResponse()
-    return render(request, "rag/index.html")
+    return JsonResponse({
+        "service": "mongo-chatbot",
+        "status": "ok",
+        "docs": "/api/v1/health/",
+    })

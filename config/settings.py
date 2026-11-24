@@ -188,12 +188,6 @@ LOGGING = {
 # ----------------------------------------------------------------- MongoDB
 MONGO_URI = os.getenv("MONGO_URI", "")
 MONGO_DATABASE = os.getenv("MONGO_DATABASE", "")
-# Optional isolated connection used only by the LLM-generated read path. Give this
-# MongoDB user the built-in `read` role; never reuse an application write credential.
-MONGO_READ_ONLY_URI = os.getenv("MONGO_READ_ONLY_URI", "")
-LLM_MONGO_QUERY_ENABLED = _bool("LLM_MONGO_QUERY_ENABLED", True)
-LLM_MONGO_QUERY_MAX_ROWS = max(1, min(200, _int("LLM_MONGO_QUERY_MAX_ROWS", 100)))
-LLM_MONGO_QUERY_TIMEOUT_MS = max(100, min(30000, _int("LLM_MONGO_QUERY_TIMEOUT_MS", 10000)))
 # Vector embeddings and chunk payloads live in Qdrant; MongoDB remains the source-data store.
 QDRANT_URL = os.getenv("QDRANT_URL", "")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "")
@@ -241,6 +235,7 @@ MAX_CONTEXT_CHARS = _int("MAX_CONTEXT_CHARS", 12000)
 # Conversation memory: the last 50 turns are retained, but only this many characters of
 # older turns are sent to the language model so the prompt stays within its context window.
 MAX_HISTORY_CHARS = _int("MAX_HISTORY_CHARS", 24000)
+CONVERSATION_HISTORY_TURNS = max(1, _int("CONVERSATION_HISTORY_TURNS", 10))
 # List-style questions ("list all...", "which projects...", "how many...") automatically retrieve more.
 # Set LIST_TOP_K=0 to turn this off.
 LIST_TOP_K = max(0, _int("LIST_TOP_K", 30))
@@ -314,10 +309,25 @@ DEFAULT_COLLECTION_ALIASES = {
     "organization": "workspaces",
     "organizations": "workspaces",
     "org": "workspaces",
-    "team": "workspaces",
-    "teams": "workspaces",
+    "team": "teams",
+    "teams": "teams",
     "membership": "workspacememberships",
     "memberships": "workspacememberships",
+    "attendance": "attendancedays",
+    "attendances": "attendancedays",
+    "attendanceday": "attendancedays",
+    "attendancedays": "attendancedays",
+    "presence": "attendancedays",
+    "absent": "attendancedays",
+    "present": "attendancedays",
+    "punch": "attendancesessions",
+    "punches": "attendancesessions",
+    "punchin": "attendancesessions",
+    "punchout": "attendancesessions",
+    "checkin": "attendancedays",
+    "checkout": "attendancedays",
+    "shift": "attendanceshifts",
+    "shifts": "attendanceshifts",
     "time": "cards",
     "logged": "cards",
     "loggedtime": "cards",
@@ -331,6 +341,12 @@ DEFAULT_COLLECTION_ALIASES = {
     "sales": "salesrows",
     "lead": "salesrows",
     "leads": "salesrows",
+    "deal": "salesrows",
+    "deals": "salesrows",
+    "client": "salesrows",
+    "clients": "salesrows",
+    "salestab": "salestabs",
+    "salestabs": "salestabs",
     "bid": "salesrows",
     "bids": "salesrows",
     "bidding": "salesrows",
@@ -338,17 +354,28 @@ DEFAULT_COLLECTION_ALIASES = {
     "proposals": "salesrows",
     "announcement": "announcements",
     "announcements": "announcements",
+    "bulletin": "announcements",
+    "bulletins": "announcements",
     "notice": "announcements",
     "notices": "announcements",
     "news": "announcements",
     "milestone": "milestones",
     "milestones": "milestones",
+    "deliverable": "milestones",
+    "deliverables": "milestones",
+    "milestoneapproval": "milestoneapprovals",
     "payment": "milestones",
     "payments": "milestones",
     "holiday": "holidays",
     "holidays": "holidays",
     "leaverequest": "leaverequests",
     "leaverequests": "leaverequests",
+    "leavebalance": "leaveaccrualbuckets",
+    "leavebalances": "leaveaccrualbuckets",
+    "leavebucket": "leaveaccrualbuckets",
+    "leavebuckets": "leaveaccrualbuckets",
+    "quota": "leaveaccrualbuckets",
+    "quotas": "leaveaccrualbuckets",
     "column": "lists",
     "columns": "lists",
     "stage": "lists",

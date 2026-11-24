@@ -2,7 +2,7 @@
 python manage.py check_llm
 
 Tests the language-model configuration with the same kind of calls the app makes, and says exactly what is wrong
-(wrong key, wrong model name, wrong base URL, timeout, token limit, Ollama not running ...). Your API key is
+(wrong key, wrong model name, wrong base URL, timeout, token limit). Your API key is
 never printed. Run it whenever the chat reports that the language model is unavailable.
 """
 import time
@@ -20,20 +20,15 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         s = settings
         out = self.stdout.write
-        if s.LLM_PROVIDER == "ollama":
-            where = s.OLLAMA_HOST
-        else:
-            where = s.LLM_BASE_URL
-        key = "not needed (local)" if s.LLM_PROVIDER == "ollama" else (
-            f"set ({len(s.LLM_API_KEY)} characters)" if s.LLM_API_KEY else "MISSING")
+        where = s.LLM_BASE_URL
+        key = f"set ({len(s.LLM_API_KEY)} characters)" if s.LLM_API_KEY else "MISSING"
         sends_temperature = bool((s.LLM_TEMPERATURE or "").strip()) and s.LLM_PROVIDER != "gemini"
         out(f"Provider        : {s.LLM_PROVIDER}")
         out(f"Model           : {s.LLM_MODEL}")
         out(f"Endpoint        : {where}")
         out(f"API key         : {key}")
         out(f"Temperature     : {'sent (' + s.LLM_TEMPERATURE + ')' if sends_temperature else 'not sent'}")
-        out(f"Output limit    : field '{s.LLM_MAX_TOKENS_PARAM}' = {s.LLM_MAX_TOKENS}" if s.LLM_PROVIDER != "ollama"
-            else f"Output limit    : num_predict = {s.LLM_MAX_TOKENS}, num_ctx = {s.OLLAMA_NUM_CTX}")
+        out(f"Output limit    : field '{s.LLM_MAX_TOKENS_PARAM}' = {s.LLM_MAX_TOKENS}")
         out(f"Reasoning effort: {s.LLM_REASONING_EFFORT or 'provider default'}")
         out(f"Timeout         : {s.LLM_TIMEOUT}s")
         out("")

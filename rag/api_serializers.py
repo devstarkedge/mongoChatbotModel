@@ -4,6 +4,7 @@ from rest_framework import serializers
 class AskRequestSerializer(serializers.Serializer):
     question = serializers.CharField(min_length=2, max_length=500, trim_whitespace=True)
     session_id = serializers.RegexField(r"^[A-Fa-f0-9-]{1,64}$", required=False, allow_null=True)
+    history = serializers.ListField(child=serializers.DictField(), required=False, allow_empty=True, allow_null=True)
     user_id = serializers.CharField(max_length=128, required=False, allow_blank=True, trim_whitespace=True)
     email = serializers.EmailField(max_length=254, required=False, allow_blank=True)
     role = serializers.CharField(max_length=64, required=False, allow_blank=True, trim_whitespace=True)

@@ -24,6 +24,7 @@ from .document_converter import HEX24, is_sensitive
 from .relationships import RelationshipResolver
 
 logger = logging.getLogger(__name__)
+_EXCLUDED_FIELDS = {str(name).lower() for name in settings.EXCLUDE_FIELDS}
 
 MAX_COLLECTIONS, MAX_FIELDS, MAX_DEPTH = 60, 30, 2
 MAX_VALUES, MAX_EXAMPLES, LOW_CARDINALITY = 12, 3, 25
@@ -85,9 +86,9 @@ class _Acc:
 def _collect(doc, prefix, depth, acc):
     for key, value in doc.items():
         key = str(key)
-        if key in ("_id", "__v") or is_sensitive(key):
-            continue
         path = f"{prefix}.{key}" if prefix else key
+        if key in ("_id", "__v") or is_sensitive(key) or path.lower() in _EXCLUDED_FIELDS:
+            continue
         kind = _kind(value)
         if kind is None:
             continue
@@ -99,7 +100,12 @@ def _collect(doc, prefix, depth, acc):
         elif kind == "array":
             for item in list(value)[:20]:
                 ek = _kind(item)
-                if ek in (None, "object", "array"):
+                if ek == "object":
+                    slot.elements[ek] += 1
+                    if depth < MAX_DEPTH:
+                        _collect(item, path, depth + 1, acc)
+                    continue
+                if ek in (None, "array"):
                     continue
                 slot.elements[ek] += 1
                 if ek == "reference":
@@ -176,14 +182,18 @@ _catalog = None
 _lock = threading.Lock()
 
 
-def get_catalog() -> Catalog:
+def get_catalog(db=None) -> Catalog:
     global _catalog
     with _lock:
         if _catalog is not None and time.monotonic() - _catalog.built_at < settings.CATALOG_TTL_SECONDS:
             return _catalog
         started = time.perf_counter()
-        db = mongo_service.get_db()
-        names = mongo_service.list_collections()
+        db = mongo_service.get_db() if db is None else db
+        blocked = mongo_service.blocked_collections()
+        excluded = {str(name).strip().lower() for name in settings.EXCLUDE_COLLECTIONS}
+        names = sorted(name for name in db.list_collection_names()
+                       if not name.startswith("system.") and name.lower() not in blocked | excluded
+                       and name.lower() != "rag_embeddings")
         resolver = RelationshipResolver(db, names)
         profiles = {}
         for name in names[:MAX_COLLECTIONS]:

@@ -16,11 +16,11 @@ from urllib.parse import urlparse
 from django.conf import settings
 
 from . import (action_guard, cache_service, embedding_service, embedding_store, llm_service, retrieval,
-               chat_memory, mem0_memory, structured_query, vector_index, query_correction, authorization_service)
+               chat_memory, mem0_memory, mongo_service, structured_query, vector_index, query_correction, authorization_service)
 from .exceptions import AuthorizationError, ChatbotError, InvalidRequestError, LLMError
 from .llm_service import NOT_FOUND_ANSWER
 from .structured_query import _sanitize_ids, _HEX24_STANDALONE
-from .document_converter import strip_html as _strip_html, redact_sensitive_text
+from .document_converter import strip_html as _strip_html, redact_sensitive_text, HEX24
 from .document_converter import pick_display_name
 
 logger = logging.getLogger(__name__)
@@ -466,22 +466,64 @@ def _verify_sources(sources: list[dict], allowed_ids: set[str] | None) -> list[d
 
 
 def _distinct_person_sources(sources: list[dict]) -> list[dict]:
-    """Deduplicate retrieved sources by (collection, document_id), preserving order."""
+    """Keep only deduplicated sources from the 'users' collection with human names."""
     seen = set()
     unique = []
     for source in sources or []:
-        key = (str(source.get("collection") or ""), str(source.get("document_id") or source.get("name") or ""))
+        if str(source.get("collection") or "").lower() != "users":
+            continue
+        doc_id = str(source.get("document_id") or "").strip()
+        name = str(source.get("name") or "").strip()
+        if not name or _HEX24_STANDALONE.fullmatch(name):
+            try:
+                db = mongo_service.get_db()
+                user = db["users"].find_one({"_id": {"$in": structured_query._id_variants([doc_id])}}, {"name": 1, "fullName": 1})
+                name = (user or {}).get("name") or (user or {}).get("fullName") or ""
+            except Exception:
+                pass
+        if not name or _HEX24_STANDALONE.fullmatch(name):
+            continue
+        key = name.casefold()
         if key in seen:
             continue
         seen.add(key)
-        unique.append(source)
+        s_copy = dict(source)
+        s_copy["name"] = name
+        unique.append(s_copy)
     return unique
 
 
 def _person_disambiguation_answer(sources: list[dict]) -> str:
-    """Build a disambiguation answer when several people match a person query."""
-    lines = [f"- {s.get('name') or s.get('document_id') or 'Unknown'} (id: {s.get('document_id')})" for s in sources]
-    return "I found multiple people matching. Please specify which one you mean:\n" + "\n".join(lines)
+    """Build a clean disambiguation answer without exposing raw database IDs."""
+    db = mongo_service.get_db()
+    lines = []
+    for s in sources:
+        doc_id = s.get("document_id")
+        user = None
+        if doc_id:
+            try:
+                user = db["users"].find_one(
+                    {"_id": {"$in": structured_query._id_variants([doc_id])}},
+                    {"name": 1, "fullName": 1, "role": 1, "email": 1, "title": 1}
+                )
+            except Exception:
+                pass
+        name = (user or {}).get("name") or (user or {}).get("fullName") or s.get("name")
+        if not name or _HEX24_STANDALONE.fullmatch(str(name).strip()):
+            continue
+        details = []
+        role = (user or {}).get("role") or (user or {}).get("title")
+        if role and str(role).strip().lower() not in {"user"}:
+            details.append(f"Role: {str(role).capitalize()}")
+        email = (user or {}).get("email")
+        if email and "@" in str(email):
+            details.append(f"Email: {email}")
+        detail_str = f" ({', '.join(details)})" if details else ""
+        lines.append(f"- **{name}**{detail_str}")
+
+    if not lines:
+        return NOT_FOUND_ANSWER
+    return "I found multiple team members matching that name. Please specify which one you mean:\n\n" + "\n".join(lines)
 
 
 SOURCE_CAP = 25
@@ -538,12 +580,37 @@ def _has_ambiguous_person_reference(question: str, history: list) -> bool:
     if not re.search(r"\b(?:email|role|workspace|company|department|task|project|manager|name|work)\b",
                      question, re.IGNORECASE):
         return False
+    # If the question explicitly names a person who exists in the users collection,
+    # the pronoun is a bound reference to that named person, not an ambiguous reference to history.
+    words = [w for w in re.findall(r"[A-Za-z][A-Za-z'-]*", question) if len(w) >= 3]
+    for w in words:
+        if w.lower() not in structured_query._NAME_STOPS and w.lower() not in structured_query._LOGGED_TIME_STOPS:
+            try:
+                if structured_query._ids_by_name("users", w):
+                    return False
+            except Exception:
+                pass
     people = {
         str(source.get("name") or "").strip().casefold()
         for source in history[-1].get("sources", [])
         if str(source.get("collection") or "").casefold() == "users" and source.get("name")
     }
     return len(people) != 1
+
+
+def _person_selected_from_history(question: str, history: list):
+    """Resolve a bare name only when it exactly matches a prior person lookup choice."""
+    if not history or not structured_query.is_person_lookup_question(history[-1].get("question", "")):
+        return None
+    candidates = {}
+    for source in history[-1].get("sources", []):
+        name = " ".join(str(source.get("name") or "").split())
+        if str(source.get("collection") or "").casefold() == "users" and name:
+            candidates[name.casefold()] = source
+    if len(candidates) < 2:
+        return None
+    selection = " ".join(str(question).strip().rstrip("?.!").split()).casefold()
+    return candidates.get(selection)
 
 
 def _ground_history(history: list) -> list:
@@ -586,7 +653,7 @@ def _strip_blank_bullet_lines(text: str) -> str:
     return "\n".join(lines).strip()
 
 
-def _remember(session_id, question, result, edit_index=None, user_id=None):
+def _remember(session_id, question, result, edit_index=None, user_id=None, workspace_id=None):
     # This also protects chat history from answers cached before redaction was added.
     result["answer"] = redact_sensitive_text(result.get("answer", ""))
     if session_id:
@@ -594,6 +661,9 @@ def _remember(session_id, question, result, edit_index=None, user_id=None):
             chat_memory.add(session_id, question, result["answer"], owner_id=user_id)
         else:
             chat_memory.replace(session_id, edit_index, question, result["answer"], owner_id=user_id)
+    # Store user exchange into Mem0 for cross-session continuity
+    if user_id and result.get("answer") and not result.get("blocked"):
+        mem0_memory.add_async(question, result["answer"], user_id, workspace_id=workspace_id)
 
 
 def _plain_answer(exact) -> str:
@@ -762,7 +832,7 @@ def _clean_html_text(text: str) -> str:
     return "\n".join(line for line in lines if line)
 
 
-def _exact_answer(question: str, exact, history=None) -> dict:
+def _exact_answer(question: str, exact, history=None, memory_context: str = "") -> dict:
     """Answer from an exact database query (complete list / exact count)."""
     timings = dict(exact.timings)
     mark = time.perf_counter()
@@ -778,7 +848,7 @@ def _exact_answer(question: str, exact, history=None) -> dict:
     else:
         try:
             answer = llm_service.generate(question, exact.context, max_tokens=settings.LIST_MAX_TOKENS,
-                                          history=history)
+                                          history=history, memory_context=memory_context)
         except LLMError as exc:
             logger.warning("LLM unavailable for an exact result (%s); returning the plain result.", exc.message)
             answer, degraded = _plain_answer(exact), True
@@ -878,6 +948,20 @@ def ask(
             )
         history = history[:edit_index - history_offset]
     history = _ground_history(history)
+    memory_context = mem0_memory.search(question, scope.chat_owner_id, scope.workspace_id)
+
+    selected_person = _person_selected_from_history(question, history)
+    if selected_person:
+        result = {
+            "question": question,
+            "answer": f"Got it — {selected_person['name']}. What would you like to know about them?",
+            "sources": [selected_person],
+            "cached": False,
+            "mode": "person_selection",
+            "timings_ms": {"total": 0},
+        }
+        _remember(session_id, question, result, edit_index, chat_owner_id)
+        return result
 
     conversational = check_conversational(question)
     if conversational is not None:
@@ -935,8 +1019,8 @@ def ask(
             workspace_id=scope.workspace_id, is_admin=scope.is_admin,
         )
         if personal_work is not None:
-            result = _exact_answer(question, personal_work, history)
-            _remember(session_id, question, result, edit_index, chat_owner_id)
+            result = _exact_answer(question, personal_work, history, memory_context=memory_context)
+            _remember(session_id, question, result, edit_index, chat_owner_id, workspace_id=scope.workspace_id)
             return result
 
     # This negated project-status query must bypass the general answer cache:
@@ -945,8 +1029,8 @@ def ask(
         uncompleted_projects = structured_query._uncompleted_projects_answer(
             query_text, workspace_id=scope.workspace_id)
         if uncompleted_projects is not None:
-            result = _exact_answer(question, uncompleted_projects, history)
-            _remember(session_id, question, result, edit_index, chat_owner_id)
+            result = _exact_answer(question, uncompleted_projects, history, memory_context=memory_context)
+            _remember(session_id, question, result, edit_index, chat_owner_id, workspace_id=scope.workspace_id)
             return result
 
     # Project type and status filters must be applied against live board records,
@@ -959,8 +1043,8 @@ def ask(
             workspace_id=scope.workspace_id,
         )
         if exact_projects is not None:
-            result = _exact_answer(question, exact_projects, history)
-            _remember(session_id, question, result, edit_index, chat_owner_id)
+            result = _exact_answer(question, exact_projects, history, memory_context=memory_context)
+            _remember(session_id, question, result, edit_index, chat_owner_id, workspace_id=scope.workspace_id)
             return result
 
     cache_history = history
@@ -970,14 +1054,13 @@ def ask(
            " ".join(cache_history[-1]["question"].split()).casefold() == normalized_question):
         cache_history = cache_history[:-1]
     history_key = tuple((turn["question"], turn["answer"]) for turn in cache_history)
-    memory_context = mem0_memory.search(question, scope.chat_owner_id, scope.workspace_id)
     cache_key = (scope.cache_key, session_id, normalized_question, top_k, tuple(sorted(collections or [])), hops,
                  history_key, memory_context, vector_index.current_version())
     cached = _answer_cache.get(cache_key)
     if cached is not None:
         result = copy.deepcopy(cached)
         result["cached"] = True
-        _remember(session_id, question, result, edit_index, chat_owner_id)
+        _remember(session_id, question, result, edit_index, chat_owner_id, workspace_id=scope.workspace_id)
         return result
 
 
@@ -1002,8 +1085,8 @@ def ask(
                 workspace_id=scope.workspace_id,
             )
             if leave_time_exact is not None:
-                result = _exact_answer(question, leave_time_exact, history)
-                _remember(session_id, question, result, edit_index, chat_owner_id)
+                result = _exact_answer(question, leave_time_exact, history, memory_context=memory_context)
+                _remember(session_id, question, result, edit_index, chat_owner_id, workspace_id=scope.workspace_id)
                 return result
 
     # Leave types questions (e.g. "types of leaves", "what leave types exist")
@@ -1017,8 +1100,8 @@ def ask(
                 restrict_unscoped=True,
             )
             if leave_types_exact is not None:
-                result = _exact_answer(question, leave_types_exact, history)
-                _remember(session_id, question, result, edit_index, chat_owner_id)
+                result = _exact_answer(question, leave_types_exact, history, memory_context=memory_context)
+                _remember(session_id, question, result, edit_index, chat_owner_id, workspace_id=scope.workspace_id)
                 return result
 
     # Logged-time / timesheet questions always read only nested `loggedTime` entries on
@@ -1038,10 +1121,45 @@ def ask(
             current_user_id=None if scope.user_id.startswith("guest:") else scope.user_id,
             is_admin=scope.is_admin,
             restrict_unscoped=True,
+            workspace_id=scope.workspace_id,
         )
         if exact is not None:
-            result = _exact_answer(question, exact, history)
-            _remember(session_id, question, result, edit_index, chat_owner_id)
+            result = _exact_answer(question, exact, history, memory_context=memory_context)
+            _remember(session_id, question, result, edit_index, chat_owner_id, workspace_id=scope.workspace_id)
+            return result
+
+    # Attendance questions query the canonical 'attendancedays' collection directly for zero-hallucination presence/punctuality/WFH data.
+    attendance_question = bool(structured_query._ATTENDANCE_PATTERN.search(query_text))
+    if attendance_question and not scope.is_admin and scope.user_id.startswith("guest:"):
+        raise AuthorizationError("Guest users are not permitted to view attendance information.")
+    if attendance_question:
+        exact = structured_query.try_structured(
+            query_text,
+            history=history,
+            current_user_id=None if scope.user_id.startswith("guest:") else scope.user_id,
+            is_admin=scope.is_admin,
+            restrict_unscoped=True,
+            workspace_id=scope.workspace_id,
+        )
+        if exact is not None:
+            result = _exact_answer(question, exact, history, memory_context=memory_context)
+            _remember(session_id, question, result, edit_index, chat_owner_id, workspace_id=scope.workspace_id)
+            return result
+
+    # Project/task team / assignee / member questions ("who is working on ...", "team members of ...", etc.)
+    team_question = structured_query.is_team_intent_question(query_text)
+    if team_question:
+        exact = structured_query.try_structured(
+            query_text,
+            history=history,
+            current_user_id=None if scope.user_id.startswith("guest:") else scope.user_id,
+            is_admin=scope.is_admin,
+            restrict_unscoped=True,
+            workspace_id=scope.workspace_id,
+        )
+        if exact is not None:
+            result = _exact_answer(question, exact, history, memory_context=memory_context)
+            _remember(session_id, question, result, edit_index, chat_owner_id, workspace_id=scope.workspace_id)
             return result
 
     structured_candidate = (
@@ -1064,10 +1182,10 @@ def ask(
             workspace_id=scope.workspace_id,
         )
         if exact is not None:
-            result = _exact_answer(question, exact, history)
+            result = _exact_answer(question, exact, history, memory_context=memory_context)
             if exact.source != "name-match":
                 _answer_cache.set(cache_key, copy.deepcopy(result))
-            _remember(session_id, question, result, edit_index, chat_owner_id)
+            _remember(session_id, question, result, edit_index, chat_owner_id, workspace_id=scope.workspace_id)
             return result
         cache_result = False
 
@@ -1113,10 +1231,11 @@ def ask(
     # ---- NEW: verify source IDs against scope ----
     sources = _verify_sources(sources, scope.embedding_ids)
     # ---------------------------------------------
-    if structured_query.is_person_lookup_question(query_text) and len(_distinct_person_sources(sources)) > 1:
+    distinct_persons = _distinct_person_sources(sources)
+    if structured_query.is_person_lookup_question(query_text) and len(distinct_persons) > 1:
         result = {
             "question": question,
-            "answer": _person_disambiguation_answer(_distinct_person_sources(sources)),
+            "answer": _sanitize_ids(_person_disambiguation_answer(distinct_persons)),
             "sources": sources,
             "cached": False,
             "mode": "person_disambiguation",
@@ -1126,7 +1245,7 @@ def ask(
         }
         if cache_result:
             _answer_cache.set(cache_key, copy.deepcopy(result))
-        _remember(session_id, question, result, edit_index, chat_owner_id)
+        _remember(session_id, question, result, edit_index, chat_owner_id, workspace_id=scope.workspace_id)
         logger.info("ask: person query %r matched multiple records; returning disambiguation", question)
         return result
     result = {
@@ -1139,7 +1258,7 @@ def ask(
         "timings_ms": timings,}
     if cache_result:
         _answer_cache.set(cache_key, copy.deepcopy(result))
-    _remember(session_id, question, result, edit_index, chat_owner_id)
+    _remember(session_id, question, result, edit_index, chat_owner_id, workspace_id=scope.workspace_id)
     logger.info("ask: %d hits, %d related, timings=%s", len(hits), len(related), timings)
     return result
 
@@ -1203,7 +1322,3 @@ def warm_up():
         logger.info("Vector index warm-up skipped: %s", exc.message)
     if settings.EMBEDDING_PROVIDER == "local":
         embedding_service.get_model()
-    try:
-        llm_service.warm_up()            # loads a local Ollama model into memory (no-op for hosted APIs)
-    except ChatbotError as exc:
-        logger.info("LLM warm-up skipped: %s", exc.message)

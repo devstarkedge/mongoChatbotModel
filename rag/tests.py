@@ -1466,17 +1466,17 @@ class StructuredQueryTests(MongoCase):
         self.assertEqual(answer.count("**ðŸŸ¢ TASK"), 1)
         self.assertIn("Duplicate with more detail", answer)
         self.assertNotIn("Keep me", answer)
-        self.assertNotIn("â€¢ ,", answer)
-        self.assertNotIn("â€¢ ...", answer)
-        self.assertNotIn("â€¢ TASK", answer)
+        self.assertNotIn("• ,", answer)
+        self.assertNotIn("• ...", answer)
+        self.assertNotIn("• TASK", answer)
 
         result = rag_service._exact_answer("shubham's all completed tasks", exact)
         self.assertEqual(len(result["sources"]), 2)
         self.assertEqual(result["records_used"], 2)
 
     def test_blank_bullet_lines_are_stripped_from_answers(self):
-        raw = "Header\nâ€¢ \nâ€¢ , , , , , , \nâ€¢ \nâ€¢ Keep this\nâ€¢\n\n\nFooter"
-        self.assertEqual(rag_service._strip_blank_bullet_lines(raw), "Header\nâ€¢ Keep this\n\nFooter")
+        raw = "Header\n• \n• , , , , , , \n• \n• Keep this\n•\n\n\nFooter"
+        self.assertEqual(rag_service._strip_blank_bullet_lines(raw), "Header\n• Keep this\n\nFooter")
 
         exact = structured_query.ExactResult(
             collection="cards", total=1,
@@ -1486,9 +1486,9 @@ class StructuredQueryTests(MongoCase):
             direct_answer=raw,
         )
         result = rag_service._exact_answer("shubham's all tasks", exact)
-        self.assertNotIn("\nâ€¢ \n", result["answer"])
-        self.assertNotIn("â€¢ , , ,", result["answer"])
-        self.assertIn("â€¢ Keep this", result["answer"])
+        self.assertNotIn("\n• \n", result["answer"])
+        self.assertNotIn("• , , ,", result["answer"])
+        self.assertIn("• Keep this", result["answer"])
 
     def test_html_tags_are_sent_as_plain_text_only(self):
         exact = structured_query.ExactResult(
@@ -1513,16 +1513,16 @@ class StructuredQueryTests(MongoCase):
             records=[{
                 "document_id": "1", "name": "Development",
                 "text": "Title: Development; Status: In Progress; Project: Alpha; "
-                        "Description: &nbsp;; Billable: No; Note: â€¢; Extra: &bull;",
+                        "Description: &nbsp;; Billable: No; Note: •; Extra: &bull;",
             }],
             conditions="user = Shubham", complete=True, source="planner",
         )
         answer = rag_service._format_board_answer(exact)
         self.assertIn("Development", answer)
-        self.assertNotIn("â€¢ No", answer)
+        self.assertNotIn("• No", answer)
         self.assertNotIn("&nbsp;", answer)
-        self.assertNotIn("â€¢ â€¢", answer)
-        self.assertNotIn("â€¢ &bull;", answer)
+        self.assertNotIn("• •", answer)
+        self.assertNotIn("• &bull;", answer)
 
     def test_semantic_context_strips_logged_time_without_request(self):
         hit = retrieval.Hit(
@@ -2318,7 +2318,7 @@ class LoggedTimeTests(MongoCase):
             {"_id": tisha, "name": "Tisha Grover", "email": "tisha@example.com", "role": "employee"},
             {"_id": mohit, "name": "Mohit Thakur", "email": "mohit@example.com", "role": "employee"},
         ])
-        # Tisha: 3 entries, Mohit: 1 entry â†’ Mohit takes least
+        # Tisha: 3 entries, Mohit: 1 entry -> Mohit takes least
         self.db["cards"].insert_one({
             "title": "Full Leave", "board": leave_board, "status": "done",
             "loggedTime": [
@@ -2709,207 +2709,6 @@ class SelfIdentityGuardTests(SimpleTestCase):
     def test_prompts_forbid_identity_inference_from_records(self):
         rule = "The questioner's identity is not in the records."
         self.assertIn(rule, llm_service.SYSTEM_PROMPT)
-        self.assertIn(rule, llm_service.SYSTEM_PROMPT_COMPACT)
-
-
-# =============================================================== Ollama (local model)
-import httpx  # noqa: E402
-
-OLLAMA = dict(LLM_PROVIDER="ollama", LLM_MODEL="gemma3:4b", OLLAMA_HOST="http://ollama.test:11434",
-              OLLAMA_NUM_CTX=8192, OLLAMA_KEEP_ALIVE="30m", LLM_TIMEOUT=30, LLM_TEMPERATURE="0",
-              LLM_MAX_TOKENS=600, LLM_API_KEY="", LLM_FALLBACK_PROVIDER="")
-
-
-def fake_ollama(handler):
-    """Make llm_service talk to an in-process fake Ollama instead of the network."""
-    def factory():
-        return httpx.Client(transport=httpx.MockTransport(handler), timeout=5.0)
-    return patch.object(llm_service, "_http", factory)
-
-
-def reply(content, **extra):
-    return httpx.Response(200, json={"message": {"role": "assistant", "content": content}, "done": True, **extra})
-
-
-@override_settings(**OLLAMA)
-class OllamaClientTests(SimpleTestCase):
-    def test_request_uses_native_api_with_context_window_and_no_api_key(self):
-        seen = {}
-
-        def handler(request):
-            seen["url"], seen["json"] = str(request.url), json.loads(request.content)
-            return reply("  There are 20 departments.  ")
-
-        with fake_ollama(handler):
-            answer = llm_service.generate("How many?", "EXACT QUERY RESULT ...")
-        body = seen["json"]
-        self.assertEqual(answer, "There are 20 departments.")
-        self.assertEqual(seen["url"], "http://ollama.test:11434/api/chat")
-        self.assertEqual(body["model"], "gemma3:4b")
-        self.assertIs(body["stream"], False)
-        self.assertEqual(body["keep_alive"], "30m")
-        self.assertEqual(body["options"], {"num_ctx": 8192, "num_predict": 600, "temperature": 0.0})
-        self.assertNotIn("format", body)
-        self.assertEqual([m["role"] for m in body["messages"]], ["system", "user"])
-        self.assertIn("EXACT QUERY RESULT", body["messages"][0]["content"])
-        self.assertLess(len(body["messages"][0]["content"]), 2200)        # compact prompt for a small model
-        self.assertIn("Question: How many?", body["messages"][1]["content"])
-
-    def test_max_tokens_override_is_passed_as_num_predict(self):
-        seen = {}
-        with fake_ollama(lambda r: (seen.update(json.loads(r.content)), reply("ok"))[1]):
-            llm_service.generate("q", "ctx", max_tokens=900)
-        self.assertEqual(seen["options"]["num_predict"], 900)
-
-    def test_planner_asks_for_json_mode_and_parses_the_plan(self):
-        seen = {}
-
-        def handler(request):
-            seen.update(json.loads(request.content))
-            return reply('{"collection": "departments", "operation": "list", "filters": [], "show": ["name"]}')
-
-        with fake_ollama(handler):
-            plan = llm_service.plan_query("list departments", "- departments (20 records): name")
-        self.assertEqual(seen["format"], "json")
-        self.assertEqual(plan["collection"], "departments")
-        self.assertIn("Catalog:", seen["messages"][1]["content"])
-
-    def test_hosted_prompt_is_unchanged_for_other_providers(self):
-        with override_settings(LLM_PROVIDER="openai"):
-            self.assertIs(llm_service._system_prompt(), llm_service.SYSTEM_PROMPT)
-        self.assertIs(llm_service._system_prompt(), llm_service.SYSTEM_PROMPT_COMPACT)
-        self.assertIn(llm_service.NOT_FOUND_ANSWER, llm_service.SYSTEM_PROMPT_COMPACT)
-
-    def test_failures_become_actionable_messages(self):
-        from rag.services.exceptions import ConfigError, LLMError
-
-        def down(request):
-            raise httpx.ConnectError("refused")
-
-        with fake_ollama(down), self.assertRaises(LLMError) as cm:
-            llm_service.generate("q", "c")
-        self.assertIn("Could not reach Ollama at http://ollama.test:11434", cm.exception.message)
-        self.assertIn("ollama serve", cm.exception.message)
-
-        missing = lambda r: httpx.Response(404, json={"error": 'model "gemma3:4b" not found, try pulling it first'})
-        with fake_ollama(missing), self.assertRaises(ConfigError) as cm:
-            llm_service.generate("q", "c")
-        self.assertIn("ollama pull gemma3:4b", cm.exception.message)
-
-        def slow(request):
-            raise httpx.ReadTimeout("slow")
-
-        with fake_ollama(slow), self.assertRaises(LLMError) as cm:
-            llm_service.generate("q", "c")
-        self.assertIn("took longer than 30s", cm.exception.message)
-
-        broken = lambda r: httpx.Response(500, json={"error": "model runner has unexpectedly stopped"})
-        with fake_ollama(broken), self.assertRaises(LLMError) as cm:
-            llm_service.generate("q", "c")
-        self.assertIn("HTTP 500", cm.exception.message)
-        self.assertIn("unexpectedly stopped", cm.exception.message)
-
-        with fake_ollama(lambda r: httpx.Response(200, text="not json")), self.assertRaises(LLMError):
-            llm_service.generate("q", "c")
-
-    def test_status_reports_running_and_model_installed(self):
-        def tags(models):
-            return patch("httpx.get", return_value=httpx.Response(200, json={"models": [{"name": m} for m in models]}))
-
-        with tags(["gemma3:4b", "llama3:8b"]):
-            self.assertEqual(llm_service.status(), {"provider": "ollama", "model": "gemma3:4b",
-                                                    "reachable": True, "model_available": True})
-        with tags(["llama3:8b"]):
-            self.assertEqual(llm_service.status()["model_available"], False)
-        with patch("httpx.get", side_effect=httpx.ConnectError("down")):
-            info = llm_service.status()
-        self.assertEqual((info["reachable"], info["model_available"]), (False, False))
-        with override_settings(LLM_PROVIDER="openai"):
-            self.assertEqual(llm_service.status(), {"provider": "openai", "model": "gemma3:4b"})
-
-    def test_warm_up_loads_the_model_with_an_empty_message_list(self):
-        seen = {}
-        with fake_ollama(lambda r: (seen.update(json.loads(r.content)), reply(""))[1]):
-            llm_service.warm_up()
-        self.assertEqual((seen["model"], seen["messages"], seen["keep_alive"]), ("gemma3:4b", [], "30m"))
-        with override_settings(LLM_PROVIDER="openai"), patch.object(llm_service, "_ollama_post") as post:
-            llm_service.warm_up()
-        post.assert_not_called()
-
-
-@override_settings(STRUCT_PLANNER="on")
-class OllamaEndToEndTests(MongoCase):
-    """Whole pipeline with a fake Ollama: planner (JSON mode) then answer, on the 20-departments case."""
-
-    structured = True
-
-    def setUp(self):
-        super().setUp()
-        scope_patch = patch.object(
-            authorization_service, "resolve_scope",
-            side_effect=lambda user_id, email=None, workspace_id=None: _global_scope_for_test(user_id or self.admin_id),
-        )
-        scope_patch.start()
-        self.addCleanup(scope_patch.stop)
-        self.db["departments"].insert_many([{"name": n, "floor": i % 5} for i, n in enumerate(DEPARTMENTS)])
-        overrides = override_settings(**OLLAMA)
-        overrides.enable()
-        self.addCleanup(overrides.disable)
-        self.requests = []
-
-    def handler(self, request):
-        body = json.loads(request.content)
-        self.requests.append(body)
-        if body.get("format") == "json":
-            return reply('{"collection": "departments", "operation": "list", "filters": [], "show": ["name"]}')
-        return reply("There are 20 departments, listed below.")
-
-    def test_list_question_runs_planner_then_answer_with_all_names(self):
-        with fake_ollama(self.handler):
-            result = rag_service.ask("give me list of all departments")
-        self.assertEqual(result["mode"], "structured")
-        self.assertEqual(result["total_matching"], 20)
-        self.assertFalse(result["degraded"])
-        planner, answer = self.requests
-        self.assertEqual(planner["format"], "json")
-        user_prompt = answer["messages"][1]["content"]
-        for name in DEPARTMENTS:
-            self.assertIn(name, user_prompt)
-        self.assertNotIn("Floor", user_prompt)                         # only the requested field was sent
-        self.assertEqual(answer["options"]["num_ctx"], 8192)
-
-    def test_when_ollama_is_down_the_complete_list_is_still_returned(self):
-        def down(request):
-            raise httpx.ConnectError("refused")
-
-        with fake_ollama(down):
-            result = rag_service.ask("give me list of all departments")
-        self.assertTrue(result["degraded"])
-        self.assertEqual(result["total_matching"], 20)
-        for name in DEPARTMENTS:
-            self.assertIn(f"- {name}", result["answer"])
-
-    @override_settings(STRUCT_PLANNER="off")
-    def test_planner_can_be_switched_off_for_speed(self):
-        with fake_ollama(self.handler):
-            result = rag_service.ask("give me list of all departments")
-        self.assertEqual(result["total_matching"], 20)
-        self.assertEqual(len(self.requests), 1)                        # only the answer call, no planning call
-        self.assertNotIn("format", self.requests[0])
-
-    def test_health_reports_the_local_model(self):
-        with patch("httpx.get", return_value=httpx.Response(200, json={"models": [{"name": "gemma3:4b"}]})):
-            health = rag_service.health()
-        self.assertEqual(health["llm"]["model_available"], True)
-        self.assertEqual(health["llm_model"], "gemma3:4b")
-
-    def test_catalog_text_shrinks_for_small_models(self):
-        catalog = structured_query.build_catalog()
-        full = structured_query.catalog_text(catalog, limit=100000)
-        tiny = structured_query.catalog_text(catalog, limit=len(full) // 2)
-        self.assertLessEqual(len(tiny), len(full) // 2)
-        no_values = structured_query.catalog_text(catalog, limit=len(full) - 1)
-        self.assertNotIn("[Engineering", no_values)
 
 
 # =============================================================== Gemini (Google, OpenAI-compatible endpoint)
@@ -2961,7 +2760,7 @@ class GeminiTests(SimpleTestCase):
 
     def test_other_providers_still_send_temperature_and_max_completion_tokens(self):
         seen = []
-        with override_settings(LLM_PROVIDER="openai", LLM_MAX_TOKENS_PARAM="max_completion_tokens"), \
+        with override_settings(LLM_PROVIDER="groq", LLM_MAX_TOKENS_PARAM="max_completion_tokens"), \
              patch.object(llm_service, "_get_client", return_value=fake_openai_client("Hi", seen=seen)):
             llm_service.generate("q", "ctx")
         self.assertEqual(seen[0]["temperature"], 0.0)
@@ -3102,7 +2901,7 @@ class GeminiEndToEndTests(MongoCase):
     LLM_PROVIDER="gemini", LLM_MODEL="gemini-3.5-flash-lite", LLM_API_KEY="PRIMARY-KEY",
     LLM_BASE_URL="https://generativelanguage.googleapis.com/v1beta/openai/",
     LLM_TEMPERATURE="0", LLM_MAX_TOKENS_PARAM="max_tokens", LLM_REASONING_EFFORT="",
-    LLM_FALLBACK_PROVIDER="openai", LLM_FALLBACK_MODEL="openai/gpt-oss-120b",
+    LLM_FALLBACK_PROVIDER="groq", LLM_FALLBACK_MODEL="openai/gpt-oss-120b",
     LLM_FALLBACK_API_KEY="FALLBACK-KEY", LLM_FALLBACK_BASE_URL="https://api.groq.com/openai/v1",
     LLM_FALLBACK_MAX_TOKENS_PARAM="max_tokens", LLM_FALLBACK_TEMPERATURE="0", LLM_FALLBACK_TIMEOUT=60,
 )

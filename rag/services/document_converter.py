@@ -16,7 +16,7 @@ import re as _re
 from html.parser import HTMLParser as _HTMLParser
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal
 
 from bson import ObjectId
@@ -130,11 +130,47 @@ def iter_ref_candidates(doc: dict):
     yield from walk(doc, "", 0)
 
 
+IST_TZ = timezone(timedelta(hours=5, minutes=30), name="IST")
+UTC_TZ = timezone.utc
+
+
+def to_ist(value) -> datetime | None:
+    """Convert a UTC datetime or ISO timestamp string to IST (UTC+5:30)."""
+    if not isinstance(value, datetime):
+        if isinstance(value, str) and ("T" in value or value.endswith("Z")):
+            try:
+                s = value.replace("Z", "+00:00")
+                value = datetime.fromisoformat(s)
+            except Exception:
+                return None
+        else:
+            return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC_TZ)
+    return value.astimezone(IST_TZ)
+
+
+def to_ist_str(value, fmt="%Y-%m-%d %H:%M:%S IST") -> str:
+    """Convert a UTC datetime or ISO timestamp to formatted IST string."""
+    ist_val = to_ist(value)
+    if ist_val is None:
+        return str(value) if value is not None else ""
+    return ist_val.strftime(fmt)
+
+
+def to_ist_time_str(value, fmt="%I:%M %p IST") -> str:
+    """Convert a UTC timestamp to 12-hour IST time string (e.g., '10:30 AM IST')."""
+    ist_val = to_ist(value)
+    if ist_val is None:
+        return "Not recorded"
+    return ist_val.strftime(fmt)
+
+
 def _format_datetime(value: datetime) -> str:
-    text = f"{value:%B} {value.day}, {value.year}"
-    if (value.hour, value.minute, value.second) != (0, 0, 0):
-        tz = value.tzinfo.tzname(value) if value.tzinfo else "UTC"
-        text += f" {value:%H:%M} {tz or 'UTC'}"
+    ist_val = to_ist(value) or value
+    text = f"{ist_val:%B} {ist_val.day}, {ist_val.year}"
+    if (ist_val.hour, ist_val.minute, ist_val.second) != (0, 0, 0):
+        text += f" {ist_val:%H:%M} IST"
     return text
 
 
@@ -205,6 +241,11 @@ class _Walker:
             return "text", _format_datetime(value)
         if isinstance(value, date):
             return "text", f"{value:%B} {value.day}, {value.year}"
+        leaf = (path or "").split(".")[-1].lower()
+        if leaf in {"createdat", "updatedat", "firstcheckinat", "lastcheckoutat"}:
+            ist_dt = to_ist(value)
+            if ist_dt:
+                return "text", _format_datetime(ist_dt)
         if isinstance(value, (int, float, Decimal, Decimal128)):
             return "text", str(value)
         text = redact_sensitive_text(strip_html(" ".join(str(value).split())))

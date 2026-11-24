@@ -82,7 +82,21 @@ class AskView(APIView):
             history_state = chat_memory.get_history_state(session)
             edit_index = data.get("edit_index")
             service_edit_index = None
-            history = history_state["turns"]
+            passed_history = data.get("history")
+            if passed_history:
+                history = []
+                for turn in passed_history:
+                    if isinstance(turn, dict):
+                        q = turn.get("question") or (turn.get("content") if turn.get("role") == "user" else None)
+                        a = turn.get("answer") or (turn.get("content") if turn.get("role") in ("assistant", "bot") else None)
+                        if "question" in turn and "answer" in turn:
+                            history.append({"question": str(turn["question"]), "answer": str(turn["answer"])})
+                        elif q:
+                            history.append({"question": str(q), "answer": str(a or "")})
+                        elif a and history and not history[-1].get("answer"):
+                            history[-1]["answer"] = str(a)
+            else:
+                history = history_state["turns"]
             if edit_index is not None:
                 offset = history_state["offset"]
                 if not offset <= edit_index < offset + len(history):
@@ -115,8 +129,8 @@ class AskView(APIView):
                 edit_index=edit_index,
             )
             if edit_index is None and not result.get("blocked"):
-                mem0_memory.add_question(data["question"], memory_identity,
-                                         data.get("workspace_id") or None)
+                mem0_memory.add_async(data["question"], result["answer"], memory_identity,
+                                      data.get("workspace_id") or None)
             return Response({
                 **result,
                 "sources": result.get("sources", []),

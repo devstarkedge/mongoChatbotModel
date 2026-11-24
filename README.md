@@ -1,6 +1,6 @@
 # Mongo RAG Pro: MongoDB, Relationships, Vector Search & Structured Intelligence
 
-An enterprise-grade, retrieval-augmented intelligence system designed to answer plain-language questions across complex MongoDB schemas. The system converts raw documents into natural language, resolves relational references across collections without hardcoded schemas, embeds chunks into **Qdrant Vector DB**, performs hybrid semantic + keyword search with multi-hop graph expansion, executes deterministic structured queries for aggregate/list calculations, and synthesizes answers via LLMs (Google Gemini, OpenAI, Groq, Ollama) while enforcing strict role-based access control and data privacy.
+An enterprise-grade, retrieval-augmented intelligence system designed to answer plain-language questions across complex MongoDB schemas. The system converts raw documents into natural language, resolves relational references across collections without hardcoded schemas, embeds chunks into **Qdrant Vector DB**, performs hybrid semantic + keyword search with multi-hop graph expansion, executes deterministic structured queries for aggregate/list calculations, and synthesizes answers with Google Gemini and Groq while enforcing strict role-based access control and data privacy.
 
 ---
 
@@ -48,7 +48,7 @@ An enterprise-grade, retrieval-augmented intelligence system designed to answer 
 │    │      • Reciprocal Rank Fusion (RRF) reranking                     │
 │    │      • Multi-Hop expansion (follows forward/reverse relationships)│
 │    │      • Context Sanitization (scrubs raw IDs, resolves user names) │
-│    │      • LLM Answer Generation (Gemini 3.5 / OpenAI / Ollama)       │
+│    │      • LLM Answer Generation (Gemini / Groq)                      │
 │    │                                                                   │
 │    └──► 6. Dynamic ID Sanitization & Privacy Shield                    │
 │           • Resolves 24-hex ObjectIds against `users` collection       │
@@ -80,9 +80,11 @@ An enterprise-grade, retrieval-augmented intelligence system designed to answer 
 - **Automatic Payload Indexing**: On startup, `embedding_store.ensure_indexes()` verifies and creates required Qdrant payload schema indexes (including integer index on `metadata.chunk_index`, keyword index on `metadata.workspace_id`, and `reference_ids`).
 - **Resilient Multi-Hop Expansion**: Reverse relationship lookups (`find_referencing_batch`) run inside non-fatal handlers, allowing multi-hop queries to fall back gracefully to primary search hits without aborting user chat turns.
 
-### D. Structured Query Planner
-- **Exact Counts & Deterministic Lists**: Queries such as *"list all pending projects"*, *"how many departments are there"*, or *"unique members on Web Chat Pingly"* are translated into strict MongoDB queries rather than approximate similarity retrieval.
-- **Strict Operator Whitelist**: Supported operations (`eq`, `ne`, `in`, `contains`, `gt`, `gte`, `lt`, `lte`) prevent prompt injections while ensuring 100% precision for counts and status filters.
+### D. Optional LLM Mongo Read Planner
+- When enabled, the LLM receives live collection/field/reference metadata and generates a MongoDB read plan for list, count, and aggregation questions.
+- A separate executor validates every collection, field, operator, and pipeline stage. It exposes only `find`, `count_documents`, and a bounded read-only aggregation pipeline; write stages and undeclared joins are rejected.
+- The query path is off by default and requires a dedicated MongoDB URI whose account has only the built-in `read` role. Account/workspace document scopes are enforced before execution.
+- Rollback is immediate: set `LLM_MONGO_QUERY_ENABLED=false`. The existing `structured_query.py` path and semantic retrieval then handle requests as before.
 
 ---
 
@@ -114,6 +116,8 @@ pip install -r requirements.txt
 ### 2. Configure Environment (`.env`)
 Copy `.env.example` to `.env` and verify your settings:
 
+The LLM-generated Mongo read path is optional and disabled by default. To enable it, create a dedicated MongoDB user with the built-in `read` role on the chatbot database, set `MONGO_READ_ONLY_URI` to that user's URI, then set `LLM_MONGO_QUERY_ENABLED=true`. Keep this URI separate from `MONGO_URI`. Set the flag back to `false` to return immediately to the existing query implementation.
+
 Optional cross-chat preferences use Mem0 Platform. Install the requirements, set `MEM0_ENABLED=true`, and configure `MEM0_API_KEY` from your Mem0 dashboard. The integration stores only user questions and scopes memories by account and workspace; retrieved memories are context only, never evidence for MongoDB facts or permissions. See the [Mem0 Python quickstart](https://docs.mem0.ai/platform/quickstart).
 
 To clear saved memories for one workspace, send `DELETE /api/v1/memories/` with that `workspace_id` and the account's bearer token. This endpoint requires Mem0 to be enabled.
@@ -137,7 +141,7 @@ QDRANT_URL=https://<your-cluster>.qdrant.io:6333
 QDRANT_API_KEY=<your-qdrant-api-key>
 QDRANT_COLLECTION=rag_chunks
 
-# LLM Provider (Google Gemini, OpenAI, or Ollama)
+# LLM Provider (Google Gemini; optional Groq fallback)
 LLM_PROVIDER=gemini
 GEMINI_API_KEY=<your-gemini-api-key>
 LLM_MODEL=gemini-3.5-flash-lite
@@ -258,7 +262,7 @@ MONGO_CHATBOT/
 │   │   ├── embedding_store.py       # Qdrant client, self-healing payload indexes, vector search
 │   │   ├── embedding_service.py     # Local ONNX FastEmbed & hosted embedding generation
 │   │   ├── mongo_service.py         # MongoDB connection pooling, batch readers, document fetchers
-│   │   ├── llm_service.py           # Model integrations (Gemini, OpenAI, Ollama), system prompts
+│   │   ├── llm_service.py           # Gemini and Groq model integration, system prompts
 │   │   ├── authorization_service.py # User scope verification, workspace membership checks
 │   │   ├── retrieval.py             # Hybrid search (RRF fusion), multi-hop relation expansion
 │   │   ├── chat_memory.py           # Multi-turn memory management & edit index tracking
@@ -293,7 +297,7 @@ User (Browser/React)
     -> Mongo Service (DB access)
   -> MongoDB (business collections)
   -> Qdrant (chunk vectors + text/metadata payloads)
-  -> LLM Provider (Ollama / OpenAI / Groq)
+  -> LLM Provider (Gemini / Groq)
 
 ## Main collections used
 activities, boards, cards, departments, leave_entries, memberships, notes, projects, subtasks, tasks, users, workspaces
@@ -361,9 +365,9 @@ Qdrant collection `rag_chunks` holds vectors and their text/metadata payloads.
 - Period resolution: _extract_period handles bare months, bare years, "this week/month/year", exact dates.
 
 ## Configuration
-- .env (from .env.example) for local Ollama profile.
+- .env (from .env.example) for provider credentials.
 - MONGO_URI, MONGO_DATABASE and QDRANT_URL/QDRANT_API_KEY required (or configure QDRANT_PATH for local embedded mode).
-- LLM_PROVIDER: ollama (default local) / openai / groq.
+- LLM_PROVIDER: gemini or groq.
 - CORS via DJANGO_CORS_ALLOWED_ORIGINS.
 
 ## Running locally
@@ -372,7 +376,8 @@ Qdrant collection `rag_chunks` holds vectors and their text/metadata payloads.
 3. python -m pip install -r requirements.txt
 4. python manage.py ingest --full
 5. python manage.py runserver
-6. (Ollama) ollama pull gemma3:4b
 
 ## Tech stack
-Django, Django REST Framework, MongoDB (pymongo), Qdrant, sentence-transformers, Ollama/OpenAI/Groq, mongomock (tests).
+Django, Django REST Framework, MongoDB (pymongo), Qdrant, FastEmbed, Gemini/Groq.
+
+For running the test suite, install the test-only dependency with `python -m pip install -r requirements-dev.txt`.

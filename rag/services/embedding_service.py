@@ -21,38 +21,22 @@ _query_cache = TTLCache(maxsize=1024, ttl=3600)
 
 
 def get_model():
-    """Load the local model once (thread-safe). Prefers fastembed (ONNX, ~40MB RAM) over PyTorch (~500MB)."""
+    """Load the FastEmbed ONNX model once (thread-safe)."""
     global _model
     if _model is None:
         with _model_lock:
             if _model is None:
-                try:
-                    from fastembed import TextEmbedding
+                from fastembed import TextEmbedding
 
-                    logger.info("Loading FastEmbed ONNX model %s (low-memory) ...", settings.EMBEDDING_MODEL)
-                    _model = ("fastembed", TextEmbedding(model_name=settings.EMBEDDING_MODEL))
-                except ImportError:
-                    try:
-                        from sentence_transformers import SentenceTransformer
-
-                        logger.info("Loading SentenceTransformer model %s ...", settings.EMBEDDING_MODEL)
-                        _model = ("st", SentenceTransformer(settings.EMBEDDING_MODEL, device="cpu"))
-                    except Exception as exc:
-                        logger.exception("Could not load embedding model")
-                        raise EmbeddingError(
-                            "Could not load the embedding model. Check your internet connection "
-                            "for the first download."
-                        ) from exc
+                logger.info("Loading FastEmbed ONNX model %s (low-memory) ...", settings.EMBEDDING_MODEL)
+                _model = TextEmbedding(model_name=settings.EMBEDDING_MODEL)
     return _model
 
 
 def _encode_local(texts, batch_size):
-    kind, model = get_model()
-    if kind == "fastembed":
-        embeddings = list(model.embed(texts, batch_size=batch_size))
-        return np.ascontiguousarray(embeddings, dtype="float32")
-    return model.encode(texts, batch_size=batch_size, normalize_embeddings=True,
-                        convert_to_numpy=True, show_progress_bar=False)
+    model = get_model()
+    embeddings = list(model.embed(texts, batch_size=batch_size))
+    return np.ascontiguousarray(embeddings, dtype="float32")
 
 
 def _encode_openai(texts):

@@ -4,7 +4,7 @@ from . import views
 from . import api_views
 
 urlpatterns = [
-    path("", views.index, name="index"),  # Home page / UI entry point
+    path("", views.index, name="index"),  # API-only root (JSON response)
     path("api/v1/ask/", api_views.AskView.as_view(), name="api_ask"),  # Ask a question and get an AI answer (with RAG)
     path("ask/", api_views.AskView.as_view(), name="ask_alias"),  # Alias of ask endpoint (same task)
     path("health/", api_views.HealthView.as_view(), name="health_alias"),  # Alias for health check

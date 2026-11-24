@@ -1,4 +1,4 @@
-"""ASGI entry point. Run with:  uvicorn config.asgi:application  (async views run natively)."""
+"""ASGI entry point for deployments that use an ASGI server."""
 import os
 
 from django.core.asgi import get_asgi_application
