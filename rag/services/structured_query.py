@@ -2511,9 +2511,14 @@ def _logged_time_person_candidate(question: str):
             # Security: reject names that are too short (< 4 chars) or are generic pronouns/stop words
             if len(candidate) < 4:
                 continue
-            if candidate.lower() in _LOGGED_TIME_STOPS:
+            cand_lower = candidate.lower()
+            if cand_lower in _LOGGED_TIME_STOPS or cand_lower in {
+                "this", "that", "these", "those", "month", "week", "year", "today", "yesterday", "tomorrow",
+                "employee", "employees", "user", "users", "member", "members", "person", "people",
+                "contributor", "contributors", "staff", "least", "most", "highest", "lowest"
+            }:
                 continue
-            if candidate.lower() in {"my", "mine", "myself", "me"}:
+            if cand_lower in {"my", "mine", "myself", "me"}:
                 return None
             return candidate
     return None
@@ -2546,7 +2551,9 @@ def _logged_time_project_candidate(question: str, person_name: str = None):
             continue
         if re.search(r"\b(?:which|what|who|whom|whose|where|konsa|konse|kisme)\b", candidate, re.IGNORECASE):
             continue
-        if _extract_date_from_question(candidate):
+        if _extract_date_from_question(candidate) or _extract_period(candidate):
+            continue
+        if re.search(r"\b(?:today|yesterday|tomorrow|this\s+(?:month|week|year)|last\s+(?:month|week|year)|past\s+\d+|current\s+(?:month|week|year)|month|week|year)\b", candidate, re.IGNORECASE):
             continue
         if person_name and _norm(candidate) == _norm(person_name):
             continue
@@ -4315,8 +4322,16 @@ def _logged_time_answer(question: str, history: list = None, current_user_id: st
         if matches:
             requested_project = max(matches)[1]
 
-    if (re.search(r"\b(?:this|that|these|those)\b", text, re.IGNORECASE)
-            and not personal and not requested_person and not requested_project):
+    is_demonstrative = bool(
+        re.search(r"\b(?:this|that|these|those)\s+(?:task|card|project|board|ticket|issue)\b", text, re.IGNORECASE)
+        or (
+            re.search(r"\b(?:this|that|these|those)\b", text, re.IGNORECASE)
+            and not period
+            and not target_date
+            and not re.search(r"\b(?:who|which\s+(?:employee|user|member|person|staff|contributor)|everyone|anyone|all)\b", text, re.IGNORECASE)
+        )
+    )
+    if is_demonstrative and not personal and not requested_person and not requested_project:
         return ExactResult(
             collection="cards", total=0, records=[], conditions="ambiguous logged-time target",
             complete=True, source="planner", operation="clarify",
@@ -4420,6 +4435,8 @@ def _logged_time_answer(question: str, history: list = None, current_user_id: st
 
     if not matched:
         date_suffix = f" on {target_date_str}" if target_date_str else ""
+        if extremum and not person_name and not personal:
+            return _logged_time_empty(f"employees{date_suffix}", f"No logged-time entries were recorded on tasks or projects{date_suffix}.")
         scope = (f"'{person_name}'" if person_name else f"project '{requested_project}'"
                  if requested_project else "the cards collection")
         conditions = ("loggedTime.user = " + str(person_name) if person_name else
@@ -4519,7 +4536,13 @@ def _logged_time_answer(question: str, history: list = None, current_user_id: st
         heading = f"{qualifier} {entry_noun}{date_suffix}:"
 
     task_noun = "task" if cards_used == 1 else "tasks"
-    if extremum:
+    if team_ranking:
+        word = "least" if extremum == "least" else "most"
+        heading = f"Employee with the {word} logged time{date_suffix}: **{person_name}**"
+        lines = [heading,
+                 f"Total Logged Time: {_format_duration(total_minutes)} across {len(matched)} {entry_noun} on {cards_used} {task_noun}.",
+                 ""]
+    elif extremum:
         lines = [heading,
                  f"Duration: {_format_duration(total_minutes)} ({_format_duration(matched[0]['minutes'])} each) across {len(matched)} {entry_noun} on {cards_used} {task_noun}." if len(matched) > 1 else
                  f"Duration: {_format_duration(total_minutes)} across 1 entry on {cards_used} {task_noun}.",
