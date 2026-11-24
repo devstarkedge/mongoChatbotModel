@@ -2494,14 +2494,14 @@ def _clean_person(raw: str) -> str | None:
 def _logged_time_person_candidate(question: str):
     patterns = (
         r"\b(?:how\s+(?:much|many)\s+time|time|hours?)\s+(?:did\s+)?(?!sabse\b|sase\b)([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2})\s+(?:spend|spent|worked|working|log|logged)\b",
-        r"\b(?:spend|spent|worked|working|logged)\s+(?:by\s+)?(?!sabse\b|sase\b)([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2})\b",
+        r"\b(?:spend|spent|worked|working|logged)\s+(?:by\s+)?(?!time\b|hours?\b|minutes?\b|days?\b|sabse\b|sase\b)([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2})\b",
         r"(?:^|\b(?:in|on|across|me|mein)\s+.*?|\b(?:user|member|employee)\s+)\b(?!sabse\b|sase\b)([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2})(?:['']s\s+ka|['']s|ka|ki|ke|ko|se)?\s+(?:all\s+|total\s+)?" + f"(?:{_SUPERLATIVE_REGEX}\\s+)?" + _LOGGED_TIME_REGEX + r"\b",
         r"\b(?!sabse\b|sase\b)([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2})(?:['']s\s+ka|['']s|ka|ki|ke|ko|se)\s+(?:all\s+|total\s+)?" + f"(?:{_SUPERLATIVE_REGEX}\\s+)?" + _LOGGED_TIME_REGEX + r"\b",
         r"\b(?!sabse\b|sase\b)([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2})\s+(?:all\s+|total\s+)?" + f"(?:{_SUPERLATIVE_REGEX}\\s+)" + _LOGGED_TIME_REGEX + r"\b",
         f"(?:{_SUPERLATIVE_REGEX}\\s+)?" + _LOGGED_TIME_REGEX + r"\s+(?:of|for|by|from|kiska|kiski|kiske)\s+(?:user|member|employee)?\s*(?!sabse\b|sase\b)([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2})(?=\s+(?:in|across|on|from|between|me|mein|ka|ki|ke)\b|[?.!,]|$)",
         f"(?:{_SUPERLATIVE_REGEX}\\s+)?" + _LOGGED_TIME_REGEX + r"\s+(?:user|member|employee)?\s*(?!sabse\b|sase\b)([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2})\s*(?:ka|ki|ke|ko|se)\b",
         r"\b(?:of|for|by)\s+(?:user|member|employee)?\s*(?!sabse\b|sase\b)([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2})(?=\s+(?:in|across|on|from|between|me|mein)\b|[?.!,]|$)",
-        r"\b([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2})\s+in\s+\S+\b",
+        r"\b(?!(?:least|most|highest|lowest|logged|spent|worked|time|hours?)\b)([A-Za-z][A-Za-z'-]*(?:\s+[A-Za-z][A-Za-z'-]*){0,2})\s+in\s+\S+\b",
     )
     for pattern in patterns:
         for match in re.finditer(pattern, question, re.IGNORECASE):
@@ -2515,11 +2515,17 @@ def _logged_time_person_candidate(question: str):
             if cand_lower in _LOGGED_TIME_STOPS or cand_lower in {
                 "this", "that", "these", "those", "month", "week", "year", "today", "yesterday", "tomorrow",
                 "employee", "employees", "user", "users", "member", "members", "person", "people",
-                "contributor", "contributors", "staff", "least", "most", "highest", "lowest"
+                "contributor", "contributors", "staff", "least", "most", "highest", "lowest", "flow"
             }:
                 continue
             if cand_lower in {"my", "mine", "myself", "me"}:
                 return None
+            try:
+                db = mongo_service.get_db()
+                if db["boards"].find_one({"name": {"$regex": f"^{re.escape(candidate)}$", "$options": "i"}}):
+                    continue
+            except Exception:
+                pass
             return candidate
     return None
 
@@ -2537,8 +2543,23 @@ def _logged_time_project_candidate(question: str, person_name: str = None):
             continue
         raw = match.group(1).strip(" .'-")
         candidate = re.sub(r"^(?:the\s+)?(?:project|board|task|card)\s+", "", raw, flags=re.IGNORECASE)
-        candidate = re.sub(r"\s+(?:project|board|task|card)$", "", candidate, flags=re.IGNORECASE).strip(" .'-")
+        candidate_stripped = re.sub(r"\s+(?:project|board|task|card)$", "", candidate, flags=re.IGNORECASE).strip(" .'-")
+        try:
+            db = mongo_service.get_db()
+            if db["boards"].find_one({"name": {"$regex": f"^{re.escape(candidate)}$", "$options": "i"}}):
+                pass
+            else:
+                candidate = candidate_stripped
+        except Exception:
+            candidate = candidate_stripped
         candidate = re.sub(r"\s+(?:me|mein|par|pe|ka|ki|ke)$", "", candidate, flags=re.IGNORECASE).strip(" .'-")
+        try:
+            db = mongo_service.get_db()
+            matched_b = db["boards"].find_one({"name": {"$regex": f"^{re.escape(candidate)}$", "$options": "i"}})
+            if matched_b:
+                return matched_b.get("name") or candidate
+        except Exception:
+            pass
         if person_name:
             candidate = re.sub(rf"^{re.escape(person_name)}\s*(?:ka|ki|ke|ko|se)?\s*", "", candidate, flags=re.IGNORECASE).strip(" .'-")
         words = candidate.split()
@@ -4255,6 +4276,22 @@ def _logged_time_answer(question: str, history: list = None, current_user_id: st
                 scope_text, requested_person = prior, prior_person
                 break
 
+    min_pat = re.compile(
+        r"\b(?:least|lowest|minimum|min|smallest|shortest|less|fewer|fewest|"
+        r"sabse\s*(?:thoda|kam|chhota|chota|nyuntam)|"
+        r"sase\s*(?:thoda|kam|chhota|chota|nyuntam)|"
+        r"kam\s*se\s*kam|thoda|kam)\b",
+        re.IGNORECASE,
+    )
+    max_pat = re.compile(
+        r"\b(?:most|highest|maximum|max|largest|biggest|longest|more|"
+        r"sabse\s*(?:jayda|jyada|zyada|jada|bada|adhiktam)|"
+        r"sase\s*(?:jayda|jyada|zyada|jada|bada|adhiktam)|"
+        r"jyada\s*se\s*jyada|jayda\s*se\s*jayda|jayda|jyada|zyada)\b",
+        re.IGNORECASE,
+    )
+    extremum = "least" if min_pat.search(scope_text) else "most" if max_pat.search(scope_text) else None
+
     db = mongo_service.get_db()
     person_name, person_ids = None, []
     if personal:
@@ -4354,18 +4391,36 @@ def _logged_time_answer(question: str, history: list = None, current_user_id: st
     projection = {"title": 1, "board": 1, "status": 1, "loggedTime": 1}
     cards = list(db["cards"].find(flt, projection).sort("_id", 1)) if "cards" in existing else []
 
+    target_board_id = None
+    if requested_project and boards:
+        req_norm = _norm(requested_project)
+        for b_id, b_name in boards.items():
+            if _norm(b_name) == req_norm:
+                target_board_id = b_id
+                requested_project = b_name
+                break
+        if not target_board_id:
+            for b_id, b_name in boards.items():
+                if req_norm == _norm(b_name) or req_norm in _norm(b_name).split() or _norm(b_name) == req_norm:
+                    target_board_id = b_id
+                    requested_project = b_name
+                    break
+
     project_tokens = [t for t in re.findall(r"[a-z0-9]+", (requested_project or "").lower())
                       if t not in {"task", "tasks", "card", "cards", "project", "projects", "board", "boards"}]
     matched = []
     cards_used = 0
     for card in cards:
-        title = _clean_label(card.get("title"), "Untitled task")
         board_id = card.get("board")
+        if target_board_id and board_id is not None:
+            if str(board_id) != str(target_board_id):
+                continue
+        title = _clean_label(card.get("title"), "Untitled task")
         project = boards.get(str(board_id), "Unknown project") if board_id is not None else "Unknown project"
-        if project_tokens:
+        if not target_board_id and project_tokens:
             haystack = f"{project} {title}".lower()
             if not all(
-                token in haystack or (len(token) > 3 and token.endswith("s") and token[:-1] in haystack)
+                re.search(rf"\b{re.escape(token)}s?\b", haystack)
                 for token in project_tokens
             ):
                 continue
@@ -4435,34 +4490,18 @@ def _logged_time_answer(question: str, history: list = None, current_user_id: st
 
     if not matched:
         date_suffix = f" on {target_date_str}" if target_date_str else ""
-        if extremum and not person_name and not personal:
+        if extremum and not person_name and not personal and not requested_project:
             return _logged_time_empty(f"employees{date_suffix}", f"No logged-time entries were recorded on tasks or projects{date_suffix}.")
-        scope = (f"'{person_name}'" if person_name else f"project '{requested_project}'"
-                 if requested_project else "the cards collection")
-        conditions = ("loggedTime.user = " + str(person_name) if person_name else
-                      f"project = {requested_project}" if requested_project else "all loggedTime entries") + date_suffix
+        if requested_project:
+            scope = f"project '{requested_project}'"
+            return _logged_time_empty(scope + date_suffix, f"No logged-time entries were found for {scope}{date_suffix}.")
+        scope = (f"'{person_name}'" if person_name else "the cards collection")
+        conditions = ("loggedTime.user = " + str(person_name) if person_name else "all loggedTime entries") + date_suffix
         return _logged_time_empty(scope, f"No nested loggedTime entries matched in 'cards' ({conditions}).")
 
     user_names = _logged_time_user_names(db, {item["person_id"] for item in matched if item["person_id"]})
     for item in matched:
         item["person"] = user_names.get(item["person_id"], person_name or "Unidentified contributor")
-
-    # Check for superlative / extremum queries: least vs most
-    min_pat = re.compile(
-        r"\b(?:least|lowest|minimum|min|smallest|shortest|less|fewer|fewest|"
-        r"sabse\s*(?:thoda|kam|chhota|chota|nyuntam)|"
-        r"sase\s*(?:thoda|kam|chhota|chota|nyuntam)|"
-        r"kam\s*se\s*kam|thoda|kam)\b",
-        re.IGNORECASE,
-    )
-    max_pat = re.compile(
-        r"\b(?:most|highest|maximum|max|largest|biggest|longest|more|"
-        r"sabse\s*(?:jayda|jyada|zyada|jada|bada|adhiktam)|"
-        r"sase\s*(?:jayda|jyada|zyada|jada|bada|adhiktam)|"
-        r"jyada\s*se\s*jyada|jayda\s*se\s*jayda|jayda|jyada|zyada)\b",
-        re.IGNORECASE,
-    )
-    extremum = "least" if min_pat.search(scope_text) else "most" if max_pat.search(scope_text) else None
 
     team_ranking = False
     if extremum and not person_name and not personal:
@@ -4538,7 +4577,8 @@ def _logged_time_answer(question: str, history: list = None, current_user_id: st
     task_noun = "task" if cards_used == 1 else "tasks"
     if team_ranking:
         word = "least" if extremum == "least" else "most"
-        heading = f"Employee with the {word} logged time{date_suffix}: **{person_name}**"
+        in_proj = f" in {requested_project}" if requested_project else ""
+        heading = f"Employee with the {word} logged time{in_proj}{date_suffix}: **{person_name}**"
         lines = [heading,
                  f"Total Logged Time: {_format_duration(total_minutes)} across {len(matched)} {entry_noun} on {cards_used} {task_noun}.",
                  ""]
