@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from django.utils import timezone
+
 from bson import ObjectId
 from django.conf import settings
 
@@ -2737,9 +2739,9 @@ def _attendance_person_candidate(text: str) -> str | None:
 def _extract_attendance_date(text: str) -> str | None:
     lower = text.lower()
     if re.search(r"\btoday\b", lower):
-        return datetime.now().strftime("%Y-%m-%d")
+        return timezone.now().strftime("%Y-%m-%d")
     if re.search(r"\byesterday\b", lower):
-        return (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        return (timezone.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     if m := re.search(r"\b(\d{4}-\d{2}-\d{2})\b", text):
         return m.group(1)
     dt = _extract_date_from_question(text)
